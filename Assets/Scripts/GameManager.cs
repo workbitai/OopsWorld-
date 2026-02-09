@@ -807,6 +807,21 @@ public class GameManager : MonoBehaviour
         if (!isSplitMode) yield break;
         if (selectedPieceForSplit == null) yield break;
         if (remainingSteps <= 0) yield break;
+        // First split send may still be awaiting server ACK/update; wait briefly so we don't drop the remainder.
+        float waitForAckSeconds = 2f;
+        while (oopsSplitMoveSent && waitForAckSeconds > 0f)
+        {
+            if (!IsPlayWithOopsMode) yield break;
+            if (gameOver || !modeSelected) yield break;
+            if (currentPlayer != LocalPlayerNumber) yield break;
+            if (!isSplitMode) yield break;
+            if (selectedPieceForSplit == null) yield break;
+            if (remainingSteps <= 0) yield break;
+
+            waitForAckSeconds -= Time.deltaTime;
+            yield return null;
+        }
+
         if (oopsSplitMoveSent) yield break;
 
         List<PlayerPiece> pieces = GetPiecesForPlayer(currentPlayer);
@@ -7297,7 +7312,7 @@ public class GameManager : MonoBehaviour
                 UpdateTurnPieceHighlightsForSplitRemainder(remainingSteps, selectedPieceForSplit);
 
                 // Auto-finish split remainder in PlayWithOops to prevent soft-lock when the player is inactive.
-                if (currentPlayer == LocalPlayerNumber && oopsAutoSplitFirstSentThisTurn && !oopsAutoSplitSecondSentThisTurn && !oopsSplitMoveSent && remainingSteps > 0)
+                if (currentPlayer == LocalPlayerNumber && oopsAutoSplitFirstSentThisTurn && !oopsAutoSplitSecondSentThisTurn && remainingSteps > 0)
                 {
                     oopsAutoSplitSecondSentThisTurn = true;
                     StartCoroutine(OopsAutoSendSplitSecondNextFrame());
