@@ -199,6 +199,34 @@ public class GameManager : MonoBehaviour
 
     private readonly Dictionary<string, int> oopsPendingOriginalStepsByPawnKey = new Dictionary<string, int>();
 
+    private void ResetOopsCardAndModesForNextTurn()
+    {
+        if (currentCardHandler != null)
+        {
+            currentCardHandler.ReturnCardToStart();
+        }
+
+        cardPicked = false;
+        currentCardValue = 0;
+        currentCardPower1 = "";
+        currentCardPower2 = "";
+        currentCardHandler = null;
+
+        isSplitMode = false;
+        remainingSteps = 0;
+        selectedPieceForSplit = null;
+        oopsSplitAwaitingSecondPiece = false;
+        oopsSplitMoveSent = false;
+
+        isCard10Mode = false;
+        isCard11Mode = false;
+        selectedPieceForCard11 = null;
+        isCard12Mode = false;
+        selectedPieceForCard12 = null;
+        isSorryMode = false;
+        selectedPieceForSorry = null;
+    }
+
     private int oopsRoomUpdateSequence;
     private Coroutine oopsDeferredBaseApplyCoroutine;
 
@@ -651,6 +679,11 @@ public class GameManager : MonoBehaviour
         {
             oopsHasDeferredTurnChange = false;
             currentPlayer = desiredPlayer;
+        }
+
+        if (!moveInputLockActive && previousPlayer != currentPlayer)
+        {
+            ResetOopsCardAndModesForNextTurn();
         }
 
         Debug.Log($"<color=#00BCD4>PlayWithOops</color>: roomId={currentRoomId} players={players.Count} turnUserId={turnUserId} mappedCurrentPlayer={currentPlayer}");
@@ -1346,6 +1379,21 @@ public class GameManager : MonoBehaviour
         {
             pendingOopsOpenCard = null;
         }
+
+        // For spectator/opponent turns we still need a handler reference so we can return the open card
+        // after the move (including +7 split which completes in 2 server events).
+        if (!isLocalUid)
+        {
+            currentCardHandler = target;
+            cardPicked = true;
+            currentCardValue = cardValue != 0 ? cardValue : value1;
+            currentCardPower1 = power1 ?? "";
+            currentCardPower2 = power2 ?? "";
+
+            isSplitMode = (cardValue == 7) || isSplit || string.Equals(moveType, "SPLIT", StringComparison.OrdinalIgnoreCase);
+            remainingSteps = isSplitMode ? 7 : 0;
+            selectedPieceForSplit = null;
+        }
         target.OnOopsCardOpenResponse(cardId, power1, power2, hasDual, value1, value2);
     }
 
@@ -1912,6 +1960,7 @@ public class GameManager : MonoBehaviour
          if (IsPlayWithOopsMode && oopsHasDeferredTurnChange)
          {
              oopsHasDeferredTurnChange = false;
+             ResetOopsCardAndModesForNextTurn();
              currentPlayer = oopsDeferredCurrentPlayer;
              suppressHumanInput = currentPlayer != LocalPlayerNumber;
              UpdateTurnIndicatorUI();
@@ -2002,6 +2051,13 @@ public class GameManager : MonoBehaviour
         List<PlayerPiece> pieces = GetPiecesForPlayer(currentPlayer);
         if (pieces == null) return false;
 
+        // Priority for bot: if any pawn can do a direct +7, do it immediately.
+        if (TryPickBotMoveForSteps(7, out PlayerPiece directFirst))
+        {
+            directFirst.MovePieceDirectly(7);
+            return true;
+        }
+
         PlayerPiece bestA = null;
         PlayerPiece bestB = null;
         int bestAsteps = 0;
@@ -2040,11 +2096,6 @@ public class GameManager : MonoBehaviour
 
         if (bestA == null || bestB == null)
         {
-            if (TryPickBotMoveForSteps(7, out PlayerPiece direct))
-            {
-                direct.MovePieceDirectly(7);
-                return true;
-            }
             return false;
         }
 
@@ -3044,7 +3095,23 @@ public class GameManager : MonoBehaviour
 
             if (oopsSplitMoveSent) return false;
 
-            // Prefer a real 2-pawn split if possible; otherwise fall back to a simple +7.
+            // Priority for auto-turn: if any pawn can do a direct +7, do it immediately.
+            for (int i = 0; i < pieces.Count; i++)
+            {
+                PlayerPiece p = pieces[i];
+                if (p == null) continue;
+                if (!CheckIfMovePossible(p, 7)) continue;
+
+                bool sentSeven = TryOopsPlayCardMove(p, 7);
+                if (!sentSeven)
+                {
+                    oopsAutoMoveSentThisTurn = false;
+                }
+                if (sentSeven) StartOopsAutoMoveWatchdog("auto +7 fallback");
+                return sentSeven;
+            }
+
+            // No direct +7 possible -> try a real 2-pawn split plan.
             List<(PlayerPiece first, int firstSteps, PlayerPiece second)> splitPlans = null;
             for (int firstSteps = 1; firstSteps <= 6; firstSteps++)
             {
@@ -3083,21 +3150,6 @@ public class GameManager : MonoBehaviour
                 }
                 if (sentSplitFirst) StartOopsAutoMoveWatchdog("auto split first");
                 return sentSplitFirst;
-            }
-
-            for (int i = 0; i < pieces.Count; i++)
-            {
-                PlayerPiece p = pieces[i];
-                if (p == null) continue;
-                if (!CheckIfMovePossible(p, 7)) continue;
-
-                bool sentSeven = TryOopsPlayCardMove(p, 7);
-                if (!sentSeven)
-                {
-                    oopsAutoMoveSentThisTurn = false;
-                }
-                if (sentSeven) StartOopsAutoMoveWatchdog("auto +7 fallback");
-                return sentSeven;
             }
 
             ForceAdvanceOopsTurnLocally("split mode: no legal split and no legal +7");
@@ -7305,18 +7357,27 @@ public class GameManager : MonoBehaviour
 
         if (IsPlayWithOopsMode)
         {
-            if (isSplitMode && remainingSteps > 0 && selectedPieceForSplit != null)
+            // IMPORTANT: For +7 split, the server can send 2 separate moves.
+            // We must keep the card in-place until BOTH parts complete.
+            // This must also work for opponent moves where selectedPieceForSplit may not be set locally.
+            if (isSplitMode && remainingSteps > 0)
             {
-                StopAllTurnPieceHighlights();
-                ApplyInteractivityForSplitRemainder(remainingSteps, selectedPieceForSplit);
-                UpdateTurnPieceHighlightsForSplitRemainder(remainingSteps, selectedPieceForSplit);
-
-                // Auto-finish split remainder in PlayWithOops to prevent soft-lock when the player is inactive.
-                if (currentPlayer == LocalPlayerNumber && oopsAutoSplitFirstSentThisTurn && !oopsAutoSplitSecondSentThisTurn && remainingSteps > 0)
+                // Only update remainder UI/auto-send for the local player when we know the first piece.
+                if (currentPlayer == LocalPlayerNumber && selectedPieceForSplit != null)
                 {
-                    oopsAutoSplitSecondSentThisTurn = true;
-                    StartCoroutine(OopsAutoSendSplitSecondNextFrame());
+                    StopAllTurnPieceHighlights();
+                    ApplyInteractivityForSplitRemainder(remainingSteps, selectedPieceForSplit);
+                    UpdateTurnPieceHighlightsForSplitRemainder(remainingSteps, selectedPieceForSplit);
+
+                    // Auto-finish split remainder in PlayWithOops to prevent soft-lock when the player is inactive.
+                    if (oopsAutoSplitFirstSentThisTurn && !oopsAutoSplitSecondSentThisTurn)
+                    {
+                        oopsAutoSplitSecondSentThisTurn = true;
+                        StartCoroutine(OopsAutoSendSplitSecondNextFrame());
+                    }
                 }
+
+                // Do not return/reset the card yet.
                 return;
             }
 
