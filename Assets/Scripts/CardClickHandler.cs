@@ -851,7 +851,29 @@ public class CardClickHandler : MonoBehaviour
         }
         else
         {
-            gameObject.SetActive(false);
+            if (canvasGroup != null)
+            {
+                canvasGroup.alpha = 1f;
+            }
+
+            if (cardImage != null)
+            {
+                if (cardBackSprite != null)
+                {
+                    cardImage.sprite = cardBackSprite;
+                }
+            }
+
+            if (combinedPowerImage != null)
+            {
+                combinedPowerImage.sprite = null;
+                combinedPowerImage.enabled = false;
+            }
+
+            if (firstPowerText != null) firstPowerText.text = "";
+            if (secondPowerText != null) secondPowerText.text = "";
+
+            SetCardClickable(false);
         }
 
         if (cardImage != null && storedCardImageColor)

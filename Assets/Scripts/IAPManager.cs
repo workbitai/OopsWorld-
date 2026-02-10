@@ -44,6 +44,8 @@ public class IAPManager : MonoBehaviour
     public event Action<string> PurchaseSucceeded;
     public event Action<string, string> PurchaseFailed;
 
+    private const string LastIapTransactionIdKey = "IAP_LAST_TRANSACTION_ID";
+
     private bool isInitializing;
     private bool isInitialized;
 
@@ -455,9 +457,23 @@ public class IAPManager : MonoBehaviour
             return default;
         }
 
-        if (reward.coins > 0) wallet.AddCoins(reward.coins);
-        if (reward.diamonds > 0) wallet.AddDiamonds(reward.diamonds);
         if (reward.noAds) wallet.SetNoAds(true);
+
+        if (reward.coins > 0 || reward.diamonds > 0)
+        {
+            GameWalletApi.CreditUpdate(
+                coinsAmount: reward.coins > 0 ? reward.coins : null,
+                diamonds: reward.diamonds > 0 ? reward.diamonds : null,
+                onSuccess: null,
+                onError: error =>
+                {
+                    Debug.LogWarning($"IAPManager: CreditUpdate failed, falling back to local wallet add. error={error}");
+                    if (reward.coins > 0) wallet.AddCoins(reward.coins);
+                    if (reward.diamonds > 0) wallet.AddDiamonds(reward.diamonds);
+                },
+                refreshWalletAfter: true
+            );
+        }
 
         return reward;
     }
@@ -508,6 +524,20 @@ public class IAPManager : MonoBehaviour
             string id = args?.purchasedProduct?.definition?.id ?? string.Empty;
             if (!string.IsNullOrEmpty(id))
             {
+                string txnId = args?.purchasedProduct?.transactionID ?? string.Empty;
+                if (!string.IsNullOrEmpty(txnId))
+                {
+                    string lastTxn = PlayerPrefs.GetString(LastIapTransactionIdKey, string.Empty);
+                    if (string.Equals(lastTxn, txnId, StringComparison.Ordinal))
+                    {
+                        Debug.LogWarning($"IAPManager: Duplicate ProcessPurchase ignored. productId='{id}' txnId='{txnId}'");
+                        owner.PurchaseSucceeded?.Invoke(id);
+                        return PurchaseProcessingResult.Complete;
+                    }
+                    PlayerPrefs.SetString(LastIapTransactionIdKey, txnId);
+                    PlayerPrefs.Save();
+                }
+
                 string price = args?.purchasedProduct?.metadata?.localizedPriceString;
                 if (string.IsNullOrEmpty(price))
                 {

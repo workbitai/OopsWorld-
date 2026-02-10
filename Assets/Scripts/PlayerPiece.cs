@@ -898,10 +898,10 @@ public class PlayerPiece : MonoBehaviour
             finalIndexForTarget = aIndex;
         }
 
-        StartCoroutine(AnimateCard11SwapAndFinalize(sourcePiece, finalPosForSource, finalIndexForSource, this, finalPosForTarget, finalIndexForTarget));
+        StartCoroutine(AnimateCard11SwapAndFinalize(sourcePiece, finalPosForSource, finalIndexForSource, this, finalPosForTarget, finalIndexForTarget, true));
     }
 
-    private IEnumerator AnimateCard11SwapAndFinalize(PlayerPiece aPiece, Transform aTargetPos, int aTargetIndex, PlayerPiece bPiece, Transform bTargetPos, int bTargetIndex)
+    public IEnumerator AnimateCard11SwapAndFinalize(PlayerPiece aPiece, Transform aTargetPos, int aTargetIndex, PlayerPiece bPiece, Transform bTargetPos, int bTargetIndex, bool completeCard11Mode)
     {
         if (aPiece == null || bPiece == null || aTargetPos == null || bTargetPos == null || aTargetIndex < 0 || bTargetIndex < 0)
         {
@@ -1030,7 +1030,7 @@ public class PlayerPiece : MonoBehaviour
         ClearAllPiecesHighlights();
         DisableSwapTargetHighlightForOpponent();
 
-        if (gameManager != null)
+        if (completeCard11Mode && gameManager != null)
         {
             gameManager.CompleteCard11Mode();
         }
@@ -1481,6 +1481,25 @@ public class PlayerPiece : MonoBehaviour
 
         ClearAllPiecesHighlights();
         DisableSorryTargetHighlightForOpponent();
+
+        StartCoroutine(SorryReplaceAndSlideRoutine(startPawn, targetPos));
+    }
+
+    private IEnumerator SorryReplaceAndSlideRoutine(PlayerPiece startPawn, Transform targetPos)
+    {
+        if (startPawn == null || targetPos == null || gameManager == null)
+        {
+            yield break;
+        }
+
+        yield return null;
+
+        yield return StartCoroutine(startPawn.PerformPostLandingSlideIfNeeded(targetPos));
+
+        if (gameManager == null)
+        {
+            yield break;
+        }
 
         gameManager.CompleteSorryMode();
     }
@@ -3046,6 +3065,29 @@ public class PlayerPiece : MonoBehaviour
 
             yield return current;
         }
+    }
+
+    public IEnumerator PerformPostLandingSlideIfNeeded(Transform landedPosition)
+    {
+        if (landedPosition == null) yield break;
+        if (pathManager == null) yield break;
+        if (gameManager == null) yield break;
+
+        List<Transform> route = pathManager.GetPlayerRoutePath(playerNumber);
+        List<Transform> complete = pathManager.GetCompletePlayerPath(playerNumber);
+        int routePathLength = route != null ? route.Count : (complete != null ? complete.Count : 0);
+        if (routePathLength <= 0) yield break;
+
+        int routeEntryIndex = Mathf.Max(0, routePathLength - 2);
+        int routePathLastIndex = routePathLength - 1;
+
+        yield return StartCoroutine(SafeRunEnumerator(
+            PerformSlideIfNeeded(landedPosition, routePathLength, routeEntryIndex, routePathLastIndex),
+            ex =>
+            {
+                Debug.LogError($"🧯 PerformPostLandingSlideIfNeeded: exception during PerformSlideIfNeeded for P{playerNumber}-#{pieceNumber}: {ex}");
+                gameManager.ForceRecoverTurn("exception in PerformPostLandingSlideIfNeeded");
+            }));
     }
 
     private IEnumerator PerformSlideIfNeeded(Transform landedPosition, int routePathLength, int routeEntryIndex, int routePathLastIndex)

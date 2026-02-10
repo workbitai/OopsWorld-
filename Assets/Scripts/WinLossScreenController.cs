@@ -84,6 +84,8 @@ public class WinLossScreenController : MonoBehaviour
     private int cachedWinDiamondAmount;
     private bool cachedLocalWon;
 
+    private string lastCreditedMatchKey;
+
     public void ShowResult(int winnerPlayerNumber, int localPlayerNumber, long winCoinAmount, long winDiamondAmount, Sprite localWinnerSprite)
     {
         int local = Mathf.Clamp(localPlayerNumber, 1, 4);
@@ -93,6 +95,11 @@ public class WinLossScreenController : MonoBehaviour
         cachedLocalWon = localWon;
         cachedWinCoinAmount = ClampToInt(winCoinAmount);
         cachedWinDiamondAmount = ClampToInt(winDiamondAmount);
+
+        if (!playRewardTransferOnOpen)
+        {
+            TryCreditWinRewards(localWon, cachedWinCoinAmount, cachedWinDiamondAmount);
+        }
 
         if (winLossBannerImage != null)
         {
@@ -153,6 +160,37 @@ public class WinLossScreenController : MonoBehaviour
                 loserImage.gameObject.SetActive(true);
             }
         }
+    }
+
+    private void TryCreditWinRewards(bool localWon, int coinAmount, int diamondAmount)
+    {
+        if (!localWon) return;
+
+        if (coinAmount <= 0 && diamondAmount <= 0) return;
+
+        GameManager gm = GameManager.Instance;
+        if (gm == null) return;
+
+        string roomId = gm.CurrentRoomId;
+        string matchKey = !string.IsNullOrEmpty(roomId) ? $"room:{roomId}" : $"local:{gm.MatchNonce}";
+
+        if (string.Equals(lastCreditedMatchKey, matchKey, System.StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        lastCreditedMatchKey = matchKey;
+
+        GameWalletApi.CreditUpdate(
+            coinsAmount: coinAmount > 0 ? coinAmount : null,
+            diamonds: diamondAmount > 0 ? diamondAmount : null,
+            onSuccess: null,
+            onError: error =>
+            {
+                Debug.LogWarning($"WinLossScreenController: reward credit failed: {error}");
+            },
+            refreshWalletAfter: true
+        );
     }
 
     private void OnEnable()
@@ -419,10 +457,12 @@ public class WinLossScreenController : MonoBehaviour
 
         if (!cachedLocalWon) return;
 
-        bool hasCoin = cachedWinCoinAmount > 0;
-        bool hasDiamond = cachedWinDiamondAmount > 0;
+        bool hasCoin = cachedWinCoinAmount > 0 && coinPrefab != null;
+        bool hasDiamond = cachedWinDiamondAmount > 0 && diamondPrefab != null;
 
         if (!hasCoin && !hasDiamond) return;
+
+        TryCreditWinRewards(true, cachedWinCoinAmount, cachedWinDiamondAmount);
 
         if (spawnRoot == null)
         {

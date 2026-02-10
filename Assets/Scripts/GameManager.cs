@@ -640,6 +640,9 @@ public class GameManager : MonoBehaviour
 
         IDictionary<string, object> room = GetDict(root, "room") ?? root;
 
+        string chosenMoveType = GetString(room, "chosenMoveType", string.Empty);
+        bool wantsSwapAnimation = string.Equals(chosenMoveType, "SWAP", StringComparison.OrdinalIgnoreCase);
+
         IList players = GetList(room, "players");
         if (players == null || players.Count == 0)
         {
@@ -695,6 +698,9 @@ public class GameManager : MonoBehaviour
         List<PlayerPiece> deferredBasePieces = new List<PlayerPiece>();
         List<PlayerPiece> movedPiecesThisUpdate = new List<PlayerPiece>();
 
+        List<PlayerPiece> swapPieces = wantsSwapAnimation ? new List<PlayerPiece>(2) : null;
+        List<int> swapTargetIndices = wantsSwapAnimation ? new List<int>(2) : null;
+
         for (int i = 0; i < players.Count; i++)
         {
             IDictionary<string, object> sp = AsStringObjectDict(players[i]);
@@ -744,6 +750,13 @@ public class GameManager : MonoBehaviour
                 {
                     if (isMove)
                     {
+                        if (wantsSwapAnimation)
+                        {
+                            swapPieces.Add(piece);
+                            swapTargetIndices.Add(position);
+                            continue;
+                        }
+
                         if (piece.IsBusy)
                         {
                             Debug.Log($"PlayWithOops: skipping animate for busy piece mappedP={mappedPlayerNumber} pawnId={pawnId} -> position={position}");
@@ -795,6 +808,40 @@ public class GameManager : MonoBehaviour
                 else
                 {
                     deferredBasePieces.Add(piece);
+                }
+            }
+        }
+
+        if (wantsSwapAnimation && swapPieces != null && swapTargetIndices != null)
+        {
+            if (swapPieces.Count == 2 && swapTargetIndices.Count == 2)
+            {
+                PlayerPiece a = swapPieces[0];
+                PlayerPiece bPiece = swapPieces[1];
+                int aIndex = swapTargetIndices[0];
+                int bIndex = swapTargetIndices[1];
+
+                if (a != null && bPiece != null && pathManager != null && !a.IsBusy && !bPiece.IsBusy)
+                {
+                    Transform aTarget = pathManager.GetPathPosition(a.playerNumber, aIndex);
+                    Transform bTarget = pathManager.GetPathPosition(bPiece.playerNumber, bIndex);
+                    if (aTarget != null && bTarget != null)
+                    {
+                        Debug.Log($"PlayWithOops: SWAP animate a=P{a.playerNumber}#{a.pieceNumber}->{aIndex} b=P{bPiece.playerNumber}#{bPiece.pieceNumber}->{bIndex}");
+                        StartCoroutine(a.AnimateCard11SwapAndFinalize(a, aTarget, aIndex, bPiece, bTarget, bIndex, false));
+                        movedPiecesThisUpdate.Add(a);
+                        movedPiecesThisUpdate.Add(bPiece);
+                    }
+                }
+            }
+            else
+            {
+                Debug.LogWarning($"PlayWithOops: SWAP chosenMoveType but expected 2 moving pawns; got {swapPieces.Count}. Falling back to snap.");
+                for (int i = 0; i < swapPieces.Count && i < swapTargetIndices.Count; i++)
+                {
+                    PlayerPiece p = swapPieces[i];
+                    if (p == null) continue;
+                    p.ApplyServerPathIndexState(swapTargetIndices[i]);
                 }
             }
         }
@@ -1236,13 +1283,13 @@ public class GameManager : MonoBehaviour
             if (activeCardDeckAnimator != null)
             {
                 CardClickHandler candidate = activeCardDeckAnimator.GetLastCardHandler();
-                if (candidate != null && candidate.gameObject.activeInHierarchy)
+                if (candidate != null && candidate.gameObject.activeInHierarchy && IsCardUnderDeckShadow(candidate))
                 {
                     target = candidate;
                 }
             }
 
-            if (target == null || !target.gameObject.activeInHierarchy)
+            if (target == null || !target.gameObject.activeInHierarchy || !IsCardUnderDeckShadow(target))
             {
                 target = FindLastDeckCardHandlerFallback();
             }
@@ -3032,15 +3079,49 @@ public class GameManager : MonoBehaviour
         // (We intentionally do nothing during the main timer.)
         if (remainingSeconds < (extraSeconds - 0.5f)) return;
 
-        if (pendingOopsOpenCard == null || !pendingOopsOpenCard.gameObject.activeInHierarchy)
+        CardClickHandler cardToOpen = null;
+        if (pendingOopsOpenCard != null && pendingOopsOpenCard.gameObject.activeInHierarchy && IsCardUnderDeckShadow(pendingOopsOpenCard))
         {
-            pendingOopsOpenCard = CardClickHandler.GetLastClickableCard();
+            cardToOpen = pendingOopsOpenCard;
         }
 
-        if (pendingOopsOpenCard == null) return;
+        RefreshActiveCardDeckAnimator();
+        if (activeCardDeckAnimator != null)
+        {
+            CardClickHandler candidate = activeCardDeckAnimator.GetLastCardHandler();
+            if (candidate != null && candidate.gameObject.activeInHierarchy && IsCardUnderDeckShadow(candidate))
+            {
+                cardToOpen = candidate;
+            }
+        }
+
+        if (cardToOpen == null || !cardToOpen.gameObject.activeInHierarchy)
+        {
+            cardToOpen = FindLastDeckCardHandlerFallback();
+        }
+
+        if (cardToOpen == null) return;
+
+        pendingOopsOpenCard = cardToOpen;
 
         oopsAutoCardOpenSentThisTurn = true;
-        RequestOopsCardOpen(pendingOopsOpenCard);
+        RequestOopsCardOpen(cardToOpen);
+    }
+
+    private static bool IsCardUnderDeckShadow(CardClickHandler handler)
+    {
+        if (handler == null) return false;
+        Transform t = handler.transform;
+        while (t != null)
+        {
+            string n = t.name;
+            if (!string.IsNullOrEmpty(n) && n.IndexOf("DeckShadow", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+            t = t.parent;
+        }
+        return false;
     }
 
     private bool TryOopsAutoRandomMoveIfNeeded(float remainingSeconds, bool isExtraPhase)
@@ -4388,6 +4469,9 @@ public class GameManager : MonoBehaviour
 
     private static GameManager instance;
 
+    private int matchNonce;
+    public int MatchNonce => matchNonce;
+
     public static GameManager Instance
     {
         get
@@ -4519,6 +4603,8 @@ public class GameManager : MonoBehaviour
         if (instance == null)
         {
             instance = this;
+
+            matchNonce = 1;
 
             LoadPlayerProfileFromPrefs();
             RefreshActiveCardDeckAnimator();
@@ -5323,6 +5409,8 @@ public class GameManager : MonoBehaviour
         {
             return;
         }
+
+        matchNonce++;
 
         if (pathManager == null)
         {
