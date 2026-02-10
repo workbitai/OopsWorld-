@@ -89,6 +89,11 @@ public class PopupHandler : MonoBehaviour
         WinLossScreenController controller = winPopup.GetComponentInChildren<WinLossScreenController>(true);
         if (controller != null && gm != null)
         {
+            if (winningPlayer == gm.LocalPlayerNumber)
+            {
+                DailyTaskPrefs.AddProgress(DailyTaskPrefs.TaskId.Win3Times, 1, 3);
+            }
+
             controller.ShowResult(
                 winningPlayer,
                 gm.LocalPlayerNumber,

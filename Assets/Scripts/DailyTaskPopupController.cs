@@ -75,6 +75,7 @@ public class DailyTaskPopupController : MonoBehaviour
     {
         if (!Application.isPlaying) return;
         if (!autoInitOnEnable) return;
+        DailyTaskPrefs.MarkLoginToday();
         RefreshUI();
     }
 
@@ -96,21 +97,74 @@ public class DailyTaskPopupController : MonoBehaviour
     {
         EnsureTaskCount();
 
+        ApplyCanonicalTaskDefinitions();
+
+        SyncFromPrefs();
+
         lastStateHash = CalculateStateHash();
 
-        for (int i = 0; i < rows.Count && i < tasks.Count; i++)
+        int rowIndex = 0;
+        for (int i = 0; i < tasks.Count; i++)
+        {
+            if (IsSkippedTaskIndex(i)) continue;
+            if (rowIndex >= rows.Count) break;
+
+            var row = rows[rowIndex];
+            if (row != null)
+            {
+                if (!row.gameObject.activeSelf) row.gameObject.SetActive(true);
+                var t = tasks[i];
+                row.SetTaskName(t.title);
+                row.SetPointsText(t.rewardPoints + " Point");
+                row.SetProgress01(t.completed ? 1f : t.Progress01);
+            }
+
+            rowIndex++;
+        }
+
+        for (int i = rowIndex; i < rows.Count; i++)
         {
             var row = rows[i];
             if (row == null) continue;
-
-            var t = tasks[i];
-            row.SetTaskName(t.title);
-            row.SetPointsText(t.rewardPoints + " Point");
-            row.SetProgress01(t.completed ? 1f : t.Progress01);
+            if (row.gameObject.activeSelf) row.gameObject.SetActive(false);
         }
 
         RefreshTopProgress();
     }
+
+    private void SyncFromPrefs()
+    {
+        if (tasks == null) return;
+
+        for (int i = 0; i < tasks.Count; i++)
+        {
+            var t = tasks[i];
+            if (t == null) continue;
+
+            if (!TryGetTaskIdByIndex(i, out DailyTaskPrefs.TaskId id))
+            {
+                t.progress = 0;
+                t.completed = false;
+                continue;
+            }
+
+            t.progress = DailyTaskPrefs.GetProgress(id);
+            t.completed = DailyTaskPrefs.IsCompleted(id);
+        }
+    }
+
+    private bool TryGetTaskIdByIndex(int taskIndex, out DailyTaskPrefs.TaskId id)
+    {
+        id = DailyTaskPrefs.TaskId.LoginDaily;
+        if (taskIndex == 0) { id = DailyTaskPrefs.TaskId.LoginDaily; return true; }
+        if (taskIndex == 1) { id = DailyTaskPrefs.TaskId.Win3Times; return true; }
+        if (taskIndex == 2) { id = DailyTaskPrefs.TaskId.Watch3Ads; return true; }
+        if (taskIndex == 3) { id = DailyTaskPrefs.TaskId.PlayWithFriend; return true; }
+        if (taskIndex == 4) { id = DailyTaskPrefs.TaskId.Spend2Hour; return true; }
+        return false;
+    }
+
+    private bool IsSkippedTaskIndex(int taskIndex) => taskIndex == 3;
 
     private int CalculateStateHash()
     {
@@ -157,16 +211,33 @@ public class DailyTaskPopupController : MonoBehaviour
 
         if (topFillImage == null) return;
 
-        float sum = 0f;
-        int count = 0;
+        int completedPoints = 0;
+        int totalPoints = 0;
 
-        for (int i = 1; i < tasks.Count && i <= 4; i++)
+        for (int i = 0; i < tasks.Count; i++)
         {
-            sum += tasks[i].completed ? 1f : tasks[i].Progress01;
-            count++;
+            if (IsSkippedTaskIndex(i)) continue;
+            var t = tasks[i];
+            if (t == null) continue;
+
+            totalPoints += Mathf.Max(0, t.rewardPoints);
+            if (t.completed)
+            {
+                completedPoints += Mathf.Max(0, t.rewardPoints);
+            }
         }
 
-        float value01 = count <= 0 ? 0f : Mathf.Clamp01(sum / count);
+        float denom = 0f;
+        if (topPointValues != null && topPointValues.Count > 0)
+        {
+            denom = Mathf.Max(0f, topPointValues[topPointValues.Count - 1]);
+        }
+        if (denom <= 0f)
+        {
+            denom = Mathf.Max(1f, totalPoints);
+        }
+
+        float value01 = Mathf.Clamp01(completedPoints / denom);
         topFillImage.fillAmount = value01;
     }
 
@@ -205,22 +276,28 @@ public class DailyTaskPopupController : MonoBehaviour
         if (tasks.Count > 5) tasks.RemoveRange(5, tasks.Count - 5);
     }
 
+    private void ApplyCanonicalTaskDefinitions()
+    {
+        EnsureTaskCount();
+
+        if (tasks[0] != null) { tasks[0].title = "Login Daily"; tasks[0].target = 1; tasks[0].rewardPoints = 50; }
+        if (tasks[1] != null) { tasks[1].title = "Win 3 Times"; tasks[1].target = 3; tasks[1].rewardPoints = 50; }
+        if (tasks[2] != null) { tasks[2].title = "watch 3 ads"; tasks[2].target = 3; tasks[2].rewardPoints = 50; }
+        if (tasks[3] != null) { tasks[3].title = "Play with Friend"; tasks[3].target = 1; tasks[3].rewardPoints = 50; }
+        if (tasks[4] != null) { tasks[4].title = "Spend 2 hour"; tasks[4].target = 2; tasks[4].rewardPoints = 50; }
+    }
+
     public void AddProgress(int taskIndex, int amount)
     {
         EnsureTaskCount();
         if (taskIndex < 0 || taskIndex >= tasks.Count) return;
         if (amount <= 0) return;
 
+        if (!TryGetTaskIdByIndex(taskIndex, out DailyTaskPrefs.TaskId id)) return;
+        if (id == DailyTaskPrefs.TaskId.PlayWithFriend) return;
+
         var t = tasks[taskIndex];
-        if (t.completed) return;
-
-        t.progress += amount;
-        if (t.target > 0 && t.progress >= t.target)
-        {
-            t.progress = t.target;
-            t.completed = true;
-        }
-
+        DailyTaskPrefs.AddProgress(id, amount, t != null ? t.target : 0);
         RefreshUI();
     }
 
@@ -229,9 +306,11 @@ public class DailyTaskPopupController : MonoBehaviour
         EnsureTaskCount();
         if (taskIndex < 0 || taskIndex >= tasks.Count) return;
 
+        if (!TryGetTaskIdByIndex(taskIndex, out DailyTaskPrefs.TaskId id)) return;
+        if (id == DailyTaskPrefs.TaskId.PlayWithFriend) return;
+
         var t = tasks[taskIndex];
-        t.completed = true;
-        t.progress = Mathf.Max(t.progress, t.target);
+        DailyTaskPrefs.Complete(id, t != null ? t.target : 0);
         RefreshUI();
     }
 
@@ -240,8 +319,8 @@ public class DailyTaskPopupController : MonoBehaviour
         EnsureTaskCount();
         for (int i = 0; i < tasks.Count; i++)
         {
-            tasks[i].progress = 0;
-            tasks[i].completed = false;
+            if (!TryGetTaskIdByIndex(i, out DailyTaskPrefs.TaskId id)) continue;
+            DailyTaskPrefs.SetProgress(id, 0, tasks[i] != null ? tasks[i].target : 0);
         }
 
         RefreshUI();
