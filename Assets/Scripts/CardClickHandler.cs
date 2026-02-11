@@ -117,6 +117,11 @@ public class CardClickHandler : MonoBehaviour
     private bool isCardClickable = false; // Internal flag - card clickable hai ya nahi
     private static CardClickHandler currentlyClickableCard = null; // Track which card is clickable
 
+    private Canvas cardCanvas;
+    private bool storedCanvasState = false;
+    private bool cardCanvasBaseOverrideSorting;
+    private int cardCanvasBaseSortingOrder;
+
     public static CardClickHandler CurrentClickableCard => currentlyClickableCard;
 
     private Sprite cardBackSprite;
@@ -143,6 +148,14 @@ public class CardClickHandler : MonoBehaviour
         if (cardRectTransform == null)
         {
             Debug.LogError("CardClickHandler: RectTransform component nahi mali!");
+        }
+
+        cardCanvas = GetComponent<Canvas>();
+        if (cardCanvas != null)
+        {
+            cardCanvasBaseOverrideSorting = cardCanvas.overrideSorting;
+            cardCanvasBaseSortingOrder = cardCanvas.sortingOrder;
+            storedCanvasState = true;
         }
 
         if (cardImage != null)
@@ -621,6 +634,28 @@ public class CardClickHandler : MonoBehaviour
         cardRectTransform.localRotation = Quaternion.Euler(0, 0, 0);
         cardRectTransform.localScale = targetLocalScale;
 
+        if (cardCanvas == null)
+        {
+            cardCanvas = gameObject.GetComponent<Canvas>();
+            if (cardCanvas == null)
+            {
+                cardCanvas = gameObject.AddComponent<Canvas>();
+            }
+
+            if (!storedCanvasState)
+            {
+                cardCanvasBaseOverrideSorting = cardCanvas.overrideSorting;
+                cardCanvasBaseSortingOrder = cardCanvas.sortingOrder;
+                storedCanvasState = true;
+            }
+        }
+
+        if (cardCanvas != null)
+        {
+            cardCanvas.overrideSorting = true;
+            cardCanvas.sortingOrder = 2;
+        }
+
         // Power sprite/text assign AFTER flip complete (avoid visible swap during flip)
         if (!string.IsNullOrEmpty(cardPower1))
         {
@@ -720,13 +755,13 @@ public class CardClickHandler : MonoBehaviour
             return;
         }
         
-        StartCoroutine(ReturnCardCoroutine());
+        StartCoroutine(ReturnCardToStartCoroutine());
     }
 
     /// <summary>
     /// Card return animation coroutine (piece move thay pachhi)
     /// </summary>
-    private IEnumerator ReturnCardCoroutine()
+    private IEnumerator ReturnCardToStartCoroutine()
     {
         isAnimating = true;
         
@@ -912,6 +947,12 @@ public class CardClickHandler : MonoBehaviour
         Debug.Log(returnedToDeckShadow
             ? "Card returned to DeckShadow and is active!"
             : "Card returned to starting position and disabled!");
+
+        if (cardCanvas != null && storedCanvasState)
+        {
+            cardCanvas.overrideSorting = cardCanvasBaseOverrideSorting;
+            cardCanvas.sortingOrder = cardCanvasBaseSortingOrder;
+        }
     }
 
     /// <summary>

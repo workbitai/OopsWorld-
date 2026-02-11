@@ -291,3 +291,4 @@ MonoBehaviour:
   cardHasDualPower: 0
   cardValue1: 0
   cardValue2: 0
+  serverCardId: 
