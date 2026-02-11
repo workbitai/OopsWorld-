@@ -914,6 +914,8 @@ public class CardDeckAnimator : MonoBehaviour
             yield break;
         }
 
+        CardClickHandler.ClearCurrentlyClickableCard();
+
         GameManager gm = GameManager.Instance;
         if (gm != null)
         {
@@ -972,6 +974,13 @@ public class CardDeckAnimator : MonoBehaviour
                     cardRect.SetAsLastSibling();
 
                     RestoreTopSortingIfNeeded(cardRect.gameObject);
+
+                    CardClickHandler handler = cardRect.GetComponent<CardClickHandler>();
+                    if (handler != null)
+                    {
+                        handler.SetCardClickable(false);
+                        handler.RestoreCanvasSortingToBase();
+                    }
                 });
             }
         }

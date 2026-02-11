@@ -206,6 +206,26 @@ public class CardClickHandler : MonoBehaviour
         }
     }
 
+    public static void ClearCurrentlyClickableCard()
+    {
+        currentlyClickableCard = null;
+    }
+
+    public void RestoreCanvasSortingToBase()
+    {
+        if (!storedCanvasState) return;
+
+        if (cardCanvas == null)
+        {
+            cardCanvas = GetComponent<Canvas>();
+        }
+
+        if (cardCanvas == null) return;
+
+        cardCanvas.overrideSorting = cardCanvasBaseOverrideSorting;
+        cardCanvas.sortingOrder = cardCanvasBaseSortingOrder;
+    }
+
     public void SetOopsHidden(bool hidden)
     {
         oopsHiddenVisualsApplied = hidden;
@@ -462,16 +482,18 @@ public class CardClickHandler : MonoBehaviour
 
         if (gm != null && gm.IsPlayWithOopsMode)
         {
+            if (oopsCardOpenSent)
+            {
+                return;
+            }
+
             if (oopsWaitingForOpenResponse)
             {
                 return;
             }
 
-            if (!oopsCardOpenSent)
-            {
-                oopsCardOpenSent = true;
-                oopsWaitingForOpenResponse = true;
-            }
+            oopsCardOpenSent = true;
+            oopsWaitingForOpenResponse = true;
         }
 
         // Is card ko clickable mark karo aur biji cards disable karo
@@ -499,6 +521,7 @@ public class CardClickHandler : MonoBehaviour
 
         if (gm != null && gm.IsPlayWithOopsMode)
         {
+            SetCardClickable(false);
             gm.RequestOopsCardOpen(this);
             return;
         }

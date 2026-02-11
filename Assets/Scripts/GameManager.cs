@@ -230,10 +230,18 @@ public class GameManager : MonoBehaviour
     private int oopsRoomUpdateSequence;
     private Coroutine oopsDeferredBaseApplyCoroutine;
 
+    private bool oopsCardOpenRequestInFlight;
+
     public bool TryOopsPlayCardMove(PlayerPiece piece, int steps)
     {
         if (!IsPlayWithOopsMode) return false;
         if (piece == null) return false;
+
+        if (!TryGetDestinationForMove(piece, steps, out int _destIndex, out Transform _destPosition, out string reason))
+        {
+            Debug.LogWarning($"PlayWithOops: Move blocked (illegal move) P{piece.playerNumber}-Piece{piece.pieceNumber} steps={steps}. reason={reason}");
+            return false;
+        }
 
         SocketConnection socket = SocketConnection.Instance;
         if (socket == null || socket.CurrentState != SocketState.Connected)
@@ -289,7 +297,7 @@ public class GameManager : MonoBehaviour
         if (oopsSplitMoveSent) return false;
         if (!isSplitMode) return false;
         if (firstSteps <= 0 || firstSteps > 7) return false;
-        if (!CheckIfMovePossible(firstPiece, firstSteps)) return false;
+        if (!TryGetDestinationForMove(firstPiece, firstSteps, out int _destIndex, out Transform _destPosition, out string _reason)) return false;
 
         SocketConnection socket = SocketConnection.Instance;
         if (socket == null || socket.CurrentState != SocketState.Connected) return false;
@@ -387,7 +395,7 @@ public class GameManager : MonoBehaviour
             Debug.LogWarning($"PlayWithOops: SplitSecond blocked (steps!=remainingSteps) steps={steps} remaining={remainingSteps} pawnId={secondPiece.pieceNumber}");
             return false;
         }
-        if (!CheckIfMovePossible(secondPiece, steps))
+        if (!TryGetDestinationForMove(secondPiece, steps, out int _destIndex, out Transform _destPosition, out string _reason))
         {
             Debug.LogWarning($"PlayWithOops: SplitSecond blocked (move not possible) steps={steps} pawnId={secondPiece.pieceNumber}");
             return false;
@@ -1205,9 +1213,15 @@ public class GameManager : MonoBehaviour
             }
         }
 
+        if (oopsCardOpenRequestInFlight)
+        {
+            return;
+        }
+
         pendingOopsOpenCard = card;
 
         EnsureOopsCardOpenListener();
+        oopsCardOpenRequestInFlight = true;
         TrySendCardOpenEvent();
     }
 
@@ -1226,6 +1240,8 @@ public class GameManager : MonoBehaviour
     private void OnOopsCardOpenReceived(object data)
     {
         if (!IsPlayWithOopsMode) return;
+
+        oopsCardOpenRequestInFlight = false;
 
         object payload = data;
         if (payload is IList list)
@@ -3282,7 +3298,7 @@ public class GameManager : MonoBehaviour
                 PlayerPiece p = pieces[i];
                 if (p == null) continue;
                 if (p.IsAtHome()) continue;
-                if (CheckIfMovePossible(p, 4)) options.Add((p, 4));
+                if (TryGetDestinationForMove(p, 4, out int _destIndex, out Transform _destPosition, out string _reason)) options.Add((p, 4));
             }
         }
 
@@ -3293,7 +3309,7 @@ public class GameManager : MonoBehaviour
             {
                 PlayerPiece p = pieces[i];
                 if (p == null) continue;
-                if (CheckIfMovePossible(p, 12)) options.Add((p, 12));
+                if (TryGetDestinationForMove(p, 12, out int _destIndex, out Transform _destPosition, out string _reason)) options.Add((p, 12));
             }
 
             List<PlayerPiece> oppTargets = new List<PlayerPiece>();
@@ -3333,8 +3349,8 @@ public class GameManager : MonoBehaviour
             {
                 PlayerPiece p = pieces[i];
                 if (p == null) continue;
-                if (CheckIfMovePossible(p, 10)) options.Add((p, 10));
-                if (!p.IsAtHome() && CheckIfMovePossible(p, -1)) options.Add((p, -1));
+                if (TryGetDestinationForMove(p, 10, out int _destIndex, out Transform _destPosition, out string _reason)) options.Add((p, 10));
+                if (!p.IsAtHome() && TryGetDestinationForMove(p, -1, out int _destIndex2, out Transform _destPosition2, out string _reason2)) options.Add((p, -1));
             }
         }
         else if (isCard11Mode)
@@ -3344,7 +3360,7 @@ public class GameManager : MonoBehaviour
             {
                 PlayerPiece p = pieces[i];
                 if (p == null) continue;
-                if (CheckIfMovePossible(p, 11)) options.Add((p, 11));
+                if (TryGetDestinationForMove(p, 11, out int _destIndex, out Transform _destPosition, out string _reason)) options.Add((p, 11));
             }
 
             // Swap options (outer-track only)
@@ -3386,7 +3402,7 @@ public class GameManager : MonoBehaviour
                     PlayerPiece p = pieces[i];
                     if (p == null) continue;
                     if (steps < 0 && p.IsAtHome()) continue;
-                    if (CheckIfMovePossible(p, steps)) options.Add((p, steps));
+                    if (TryGetDestinationForMove(p, steps, out int _destIndex, out Transform _destPosition, out string _reason)) options.Add((p, steps));
                 }
             }
         }

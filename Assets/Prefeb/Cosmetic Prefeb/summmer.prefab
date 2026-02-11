@@ -284,6 +284,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   playerNumber: 1
   pieceNumber: 1
+  pawnId: 
   pathManager: {fileID: 0}
   gameManager: {fileID: 0}
   stepJumpHeight: 1.1
@@ -300,6 +301,8 @@ MonoBehaviour:
   objectMinScale: 0.7
   objectMaxScale: 1
   objectBounceDuration: 0.1
+  card11SwapDuration: 0.35
+  card11SwapCurveAmount: 10
   turnGlow: {fileID: 7523589187183344282}
   inspectorStatus: 
   debugPrintMoveDestinations: 0
