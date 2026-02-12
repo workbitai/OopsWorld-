@@ -123,11 +123,30 @@ public class GameManager : MonoBehaviour
     private bool oopsAutoSplitFirstSentThisTurn;
     private bool oopsAutoSplitSecondSentThisTurn;
 
+    private Coroutine oopsOpponentNoMoveWatchdog;
+    private Coroutine oopsLocalNoMoveWatchdog;
+
+    private float oopsSuppressServerTurnUntil;
+    private int oopsSuppressServerTurnPlayer;
+    private int oopsSuppressServerTurnKeepPlayer;
+
     private void ForceAdvanceOopsTurnLocally(string reason)
     {
         if (!IsPlayWithOopsMode) return;
 
-        Debug.LogWarning($"PlayWithOops: ForceAdvanceOopsTurnLocally: {reason}");
+        int previousPlayer = currentPlayer;
+
+        if (oopsLocalNoMoveWatchdog != null)
+        {
+            StopCoroutine(oopsLocalNoMoveWatchdog);
+            oopsLocalNoMoveWatchdog = null;
+        }
+
+        if (oopsOpponentNoMoveWatchdog != null)
+        {
+            StopCoroutine(oopsOpponentNoMoveWatchdog);
+            oopsOpponentNoMoveWatchdog = null;
+        }
 
         // Best-effort: unlock input + card animation lock so UI can continue.
         NotifyMoveCompleted();
@@ -178,6 +197,12 @@ public class GameManager : MonoBehaviour
                 currentPlayer = 1;
             }
         }
+
+        // If the server is still reporting the previous turn index for a short time,
+        // suppress that stale turn assignment so the next player actually gets time to act.
+        oopsSuppressServerTurnPlayer = previousPlayer;
+        oopsSuppressServerTurnKeepPlayer = currentPlayer;
+        oopsSuppressServerTurnUntil = Time.unscaledTime + 0.75f;
 
         suppressHumanInput = currentPlayer != 1;
         UpdateTurnIndicatorUI();
@@ -542,6 +567,7 @@ public class GameManager : MonoBehaviour
         socket.ListenReplace("playCard", OnOopsPlayingCardReceived);
         hasOopsPlayingCardListener = true;
     }
+
     private void OnOopsPlayCardAckReceived(object ack)
     {
         if (!IsPlayWithOopsMode) return;
@@ -679,6 +705,16 @@ public class GameManager : MonoBehaviour
         int previousPlayer = currentPlayer;
         string turnUserId = ResolveTurnUserId(room, players, string.Empty);
         int desiredPlayer = ResolveMappedPlayerFromTurnUserId(turnUserId, userIdToMappedPlayer, players);
+
+        if (Time.unscaledTime < oopsSuppressServerTurnUntil && desiredPlayer == oopsSuppressServerTurnPlayer)
+        {
+            Debug.Log($"PlayWithOops: suppressing stale server turn (server={desiredPlayer}) keeping local={oopsSuppressServerTurnKeepPlayer}");
+            desiredPlayer = oopsSuppressServerTurnKeepPlayer;
+        }
+        else if (desiredPlayer != oopsSuppressServerTurnPlayer)
+        {
+            oopsSuppressServerTurnUntil = 0f;
+        }
 
         if (moveInputLockActive && moveInputLockPlayer > 0)
         {
@@ -996,7 +1032,7 @@ public class GameManager : MonoBehaviour
 
         if (token != oopsAutoMoveWatchdogToken) yield break;
 
-        Debug.LogError($"🧯 OOPS AUTO WATCHDOG: No server update after auto playCard. Forcing recovery. reason={reason}, currentPlayer={currentPlayer}, cardPicked={cardPicked}, card={currentCardValue}, isSplitMode={isSplitMode}, remainingSteps={remainingSteps}");
+        Debug.LogError($" OOPS AUTO WATCHDOG: No server update after auto playCard. Forcing recovery. reason={reason}, currentPlayer={currentPlayer}, cardPicked={cardPicked}, card={currentCardValue}, isSplitMode={isSplitMode}, remainingSteps={remainingSteps}");
         ForceRecoverTurn("oops auto watchdog timeout");
     }
 
@@ -1453,9 +1489,17 @@ public class GameManager : MonoBehaviour
             currentCardPower1 = power1 ?? "";
             currentCardPower2 = power2 ?? "";
 
+            isCard11Mode = (currentCardValue == 11) || isSwap || string.Equals(moveType, "SWAP", StringComparison.OrdinalIgnoreCase);
             isSplitMode = (cardValue == 7) || isSplit || string.Equals(moveType, "SPLIT", StringComparison.OrdinalIgnoreCase);
             remainingSteps = isSplitMode ? 7 : 0;
             selectedPieceForSplit = null;
+
+            if (oopsOpponentNoMoveWatchdog != null)
+            {
+                StopCoroutine(oopsOpponentNoMoveWatchdog);
+                oopsOpponentNoMoveWatchdog = null;
+            }
+            oopsOpponentNoMoveWatchdog = StartCoroutine(OopsOpponentNoMoveWatchdogRoutine(currentPlayer, target));
         }
         target.OnOopsCardOpenResponse(cardId, power1, power2, hasDual, value1, value2);
     }
@@ -1622,6 +1666,206 @@ public class GameManager : MonoBehaviour
                 gameplay.SetActive(true);
                 OnGameplayScreenOpened();
             }
+        }
+
+        if (oopsOpponentNoMoveWatchdog != null)
+        {
+            StopCoroutine(oopsOpponentNoMoveWatchdog);
+            oopsOpponentNoMoveWatchdog = null;
+        }
+    }
+
+    private bool HasAnyLegalActionForCard11SwapOrForward(int playerNumber)
+    {
+        List<PlayerPiece> pieces = GetPiecesForPlayer(playerNumber);
+        if (pieces != null)
+        {
+            for (int i = 0; i < pieces.Count; i++)
+            {
+                PlayerPiece p = pieces[i];
+                if (p == null) continue;
+                if (TryGetDestinationForMove(p, 11, out int _destIndex, out Transform _destPos, out string _reason))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // Swap: any attacker on outer track + any opponent on outer track.
+        bool hasAttacker = false;
+        if (pieces != null)
+        {
+            for (int i = 0; i < pieces.Count; i++)
+            {
+                PlayerPiece p = pieces[i];
+                if (p == null) continue;
+                p.SyncCurrentPathIndexFromTransform();
+                if (p.IsOnOuterTrack())
+                {
+                    hasAttacker = true;
+                    break;
+                }
+            }
+        }
+
+        if (!hasAttacker) return false;
+
+        foreach (var opp in GetOpponentPieces(playerNumber))
+        {
+            if (opp == null) continue;
+            opp.SyncCurrentPathIndexFromTransform();
+            if (opp.IsOnOuterTrack())
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool HasAnyLegalActionForPickedCard(int playerNumber, int pickedCardValue)
+    {
+        if (isSorryMode)
+        {
+            return IsAnyActionPossibleForSorry();
+        }
+
+        List<PlayerPiece> pieces = GetPiecesForPlayer(playerNumber);
+        if (pieces == null || pieces.Count == 0) return false;
+
+        if (pickedCardValue == 7)
+        {
+            if (isSplitMode)
+            {
+                return CheckIfSplitPossible();
+            }
+
+            for (int i = 0; i < pieces.Count; i++)
+            {
+                PlayerPiece p = pieces[i];
+                if (p == null) continue;
+                if (TryGetDestinationForMove(p, 7, out _, out _, out _)) return true;
+            }
+            return false;
+        }
+
+        if (isCard10Mode || pickedCardValue == 10)
+        {
+            for (int i = 0; i < pieces.Count; i++)
+            {
+                PlayerPiece p = pieces[i];
+                if (p == null) continue;
+                if (TryGetDestinationForMove(p, 10, out _, out _, out _)) return true;
+                if (!p.IsAtHome() && TryGetDestinationForMove(p, -1, out _, out _, out _)) return true;
+            }
+            return false;
+        }
+
+        if (isCard11Mode || pickedCardValue == 11)
+        {
+            return HasAnyLegalActionForCard11SwapOrForward(playerNumber);
+        }
+
+        if (isCard12Mode || pickedCardValue == 12)
+        {
+            for (int i = 0; i < pieces.Count; i++)
+            {
+                PlayerPiece p = pieces[i];
+                if (p == null) continue;
+                if (TryGetDestinationForMove(p, 12, out _, out _, out _)) return true;
+            }
+
+            bool hasTarget = false;
+            foreach (var opp in GetOpponentPieces(playerNumber))
+            {
+                if (opp == null) continue;
+                opp.SyncCurrentPathIndexFromTransform();
+                if (opp.IsOnOuterTrack())
+                {
+                    hasTarget = true;
+                    break;
+                }
+            }
+
+            if (!hasTarget) return false;
+
+            for (int i = 0; i < pieces.Count; i++)
+            {
+                PlayerPiece attacker = pieces[i];
+                if (attacker == null) continue;
+                attacker.SyncCurrentPathIndexFromTransform();
+                if (attacker.IsAtHome()) continue;
+                if (attacker.IsOnHomePath()) continue;
+                if (attacker.IsFinishedInHomePath()) continue;
+                return true;
+            }
+            return false;
+        }
+
+        int steps = pickedCardValue;
+        if (steps == 0) return false;
+
+        for (int i = 0; i < pieces.Count; i++)
+        {
+            PlayerPiece p = pieces[i];
+            if (p == null) continue;
+            if (steps < 0 && p.IsAtHome()) continue;
+            if (TryGetDestinationForMove(p, steps, out _, out _, out _)) return true;
+        }
+
+        return false;
+    }
+
+    private IEnumerator OopsOpponentNoMoveWatchdogRoutine(int expectedPlayer, CardClickHandler expectedCard)
+    {
+        float timeout = 3.0f;
+        while (timeout > 0f)
+        {
+            timeout -= Time.deltaTime;
+
+            if (!IsPlayWithOopsMode) yield break;
+            if (gameOver || !modeSelected) yield break;
+            if (currentPlayer != expectedPlayer) yield break;
+
+            // If card was cleared or replaced, server probably advanced.
+            if (!cardPicked || currentCardHandler == null || currentCardHandler != expectedCard) yield break;
+
+            yield return null;
+        }
+
+        // Still stuck on same player's opened card: if no legal action exists, force advance locally.
+        bool hasLegal = true;
+        if (isCard11Mode || currentCardValue == 11)
+        {
+            hasLegal = HasAnyLegalActionForCard11SwapOrForward(expectedPlayer);
+        }
+
+        if (!hasLegal)
+        {
+            ForceAdvanceOopsTurnLocally("opponent cardOpen: no legal actions (watchdog)");
+        }
+    }
+
+    private IEnumerator OopsLocalNoMoveWatchdogRoutine(int expectedPlayer, CardClickHandler expectedCard)
+    {
+        // Wait a frame so piece indices/interactivity settle after card face is applied.
+        yield return null;
+
+        if (!IsPlayWithOopsMode) yield break;
+        if (gameOver || !modeSelected) yield break;
+        if (currentPlayer != expectedPlayer) yield break;
+        if (currentPlayer != LocalPlayerNumber) yield break;
+        if (!cardPicked || currentCardHandler == null || currentCardHandler != expectedCard) yield break;
+
+        bool hasLegal = true;
+        if (isCard11Mode || currentCardValue == 11)
+        {
+            hasLegal = HasAnyLegalActionForCard11SwapOrForward(expectedPlayer);
+        }
+
+        if (!hasLegal)
+        {
+            ForceAdvanceOopsTurnLocally("local cardOpen: no legal actions");
         }
     }
 
@@ -3091,9 +3335,13 @@ public class GameManager : MonoBehaviour
 
         float extraSeconds = GetEffectiveTurnCountdownExtraSeconds();
 
+        // Support very small timers for testing. Fire at the very start of the extra phase.
+        // (remainingSeconds starts near extraSeconds and counts down.)
+        float openWindow = Mathf.Max(0.02f, Mathf.Min(0.25f, extraSeconds * 0.25f));
+
         // Extra countdown: auto pick right at the start of the extra timer.
         // (We intentionally do nothing during the main timer.)
-        if (remainingSeconds < (extraSeconds - 0.5f)) return;
+        if (remainingSeconds < (extraSeconds - openWindow)) return;
 
         CardClickHandler cardToOpen = null;
         if (pendingOopsOpenCard != null && pendingOopsOpenCard.gameObject.activeInHierarchy && IsCardUnderDeckShadow(pendingOopsOpenCard))
@@ -3153,8 +3401,11 @@ public class GameManager : MonoBehaviour
 
         float extraSeconds = GetEffectiveTurnCountdownExtraSeconds();
 
-        // Extra countdown: move starting ~2 seconds into the extra timer, until >1s remains.
-        if (remainingSeconds > Mathf.Max(0f, extraSeconds - 2f) || remainingSeconds <= 1f) return false;
+        // Support very small timers for testing. Use a relative move window within the extra timer.
+        // Example: extraSeconds=1.0 => allow moves roughly after first ~20% of the timer, until near the end.
+        float moveStartAfter = Mathf.Clamp(extraSeconds * 0.20f, 0.05f, 0.60f);
+        float moveEndBefore = Mathf.Clamp(extraSeconds * 0.10f, 0.02f, 0.30f);
+        if (remainingSeconds > (extraSeconds - moveStartAfter) || remainingSeconds <= moveEndBefore) return false;
 
         List<PlayerPiece> pieces = GetPiecesForPlayer(currentPlayer);
         if (pieces == null || pieces.Count == 0) return false;
@@ -5955,6 +6206,8 @@ public class GameManager : MonoBehaviour
         cardPicked = true;
         currentCardValue = cardValue;
 
+        bool queuedSkipTurn = false;
+
         isSplitMode = false;
         remainingSteps = 0;
         selectedPieceForSplit = null;
@@ -6159,11 +6412,26 @@ public class GameManager : MonoBehaviour
             {
                 Debug.LogWarning($"⚠️ No attack possible for Player {currentPlayer} with SORRY!. Turn will be skipped.");
                 StartCoroutine(SkipTurnAfterDelay());
+                queuedSkipTurn = true;
+            }
+        }
+
+        if (IsPlayWithOopsMode && currentPlayer == LocalPlayerNumber)
+        {
+            if (oopsLocalNoMoveWatchdog != null)
+            {
+                StopCoroutine(oopsLocalNoMoveWatchdog);
+                oopsLocalNoMoveWatchdog = null;
+            }
+
+            if (isCard11Mode || currentCardValue == 11)
+            {
+                oopsLocalNoMoveWatchdog = StartCoroutine(OopsLocalNoMoveWatchdogRoutine(currentPlayer, currentCardHandler));
             }
         }
 
         // Rule: Jo koi pan move possible nathi to turn SKIP (special cards mate)
-        if (cardValue == 8 || cardValue == 10 || cardValue == 11)
+        if (!IsPlayWithOopsMode && (cardValue == 8 || cardValue == 10 || cardValue == 11))
         {
             if (!IsAnyActionPossibleForSpecialCard(cardValue))
             {
@@ -6180,6 +6448,16 @@ public class GameManager : MonoBehaviour
                 }
 
                 StartCoroutine(SkipTurnAfterDelay());
+                queuedSkipTurn = true;
+            }
+        }
+
+        if (IsPlayWithOopsMode && currentPlayer == LocalPlayerNumber && !queuedSkipTurn)
+        {
+            if (!HasAnyLegalActionForPickedCard(currentPlayer, cardValue))
+            {
+                StartCoroutine(SkipTurnAfterDelay());
+                queuedSkipTurn = true;
             }
         }
 
@@ -7279,10 +7557,16 @@ public class GameManager : MonoBehaviour
         // Highlights clear karo
         ClearAllPieceHighlights();
         PlayerPiece.ClearAllPiecesHighlights();
-        
-        yield return new WaitForSeconds(1f); // Thoduk delay (user ne samaj aavi jay)
+
+        yield return new WaitForSeconds(IsPlayWithOopsMode ? 2f : 1f); // Thoduk delay (user ne samaj aavi jay)
 
         //Debug.Log($"⏭️ Skipping turn for Player {currentPlayer} - No move possible");
+
+        if (IsPlayWithOopsMode)
+        {
+            ForceAdvanceOopsTurnLocally("skip turn: no legal action");
+            yield break;
+        }
 
         // Card return karo
         if (currentCardHandler != null)

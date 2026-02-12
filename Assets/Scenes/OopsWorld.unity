@@ -16001,8 +16001,8 @@ MonoBehaviour:
   delayTurnUiUntilDeckReady: 1
   enableTurnTimerInPlayWithOops: 1
   oopsUseFastTurnTimers: 1
-  oopsTurnCountdownSeconds: 10
-  oopsTurnCountdownExtraSeconds: 6
+  oopsTurnCountdownSeconds: 2
+  oopsTurnCountdownExtraSeconds: 2
   powerButton: {fileID: 1437886451}
   player1CardSpriteVariant: 1
   player2CardSpriteVariant: 2

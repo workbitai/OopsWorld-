@@ -2494,7 +2494,9 @@ public class PlayerPiece : MonoBehaviour
         // Path par step-by-step move karo (ek ek step jump karti - Ludo style)
         if (isBackward)
         {
-            bool isBackwardOutOfHome = (originalSteps < 0 && startIndex >= routePathLength && endIndex <= routeEntryIndex);
+            // Backward move from HOME PATH should always exit directly to routeEntryIndex (second-last route tile)
+            // and must never animate through routePathLastIndex.
+            bool isBackwardOutOfHome = (startIndex >= routePathLength && endIndex < routePathLength);
 
             if (isBackwardOutOfHome)
             {
