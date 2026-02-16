@@ -777,6 +777,13 @@ public class CardClickHandler : MonoBehaviour
             //Debug.LogWarning("Card is already animating, cannot return!");
             return;
         }
+
+        GameManager gm = GameManager.Instance;
+        if (gm != null && gm.ShouldDeferOopsCardReturn(this))
+        {
+            gm.DeferOopsCardReturn(this);
+            return;
+        }
         
         StartCoroutine(ReturnCardToStartCoroutine());
     }

@@ -118,6 +118,86 @@ public class GameManager : MonoBehaviour
 
     private bool hasOopsPlayingCardListener;
 
+    private bool hasOopsUserTurnListener;
+
+    private float oopsLastUserTurnCardTime;
+    private float oopsLastUserTurnPlayCardTime;
+
+    private int oopsUserTurnSendToken;
+
+    private bool oopsFinalizeCardOnNextUserTurn;
+    private CardClickHandler oopsPendingCardReturnHandler;
+
+    private bool oopsSplitInProgress;
+
+    private bool oopsDeferredUserTurnSend;
+    private PlayerPiece oopsDeferredUserTurnMovedPiece;
+
+    private string oopsCurrentTurnUserId;
+
+    private string oopsFinalizeArmedTurnUserId;
+    private int oopsFinalizeArmedPlayer;
+
+    private string oopsOpenCardOwnerUserId;
+
+    private string oopsLastMovingPlayerId;
+
+    private bool oopsUserTurnInFlight;
+
+    private bool oopsUserTurnQueued;
+    private PlayerPiece oopsQueuedUserTurnMovedPiece;
+    private string oopsQueuedUserTurnReason;
+
+    private readonly Queue<PlayerPiece> oopsQueuedUserTurnMovedPieces = new Queue<PlayerPiece>();
+
+    private int oopsLastRoomUpdateSeqWithSnapMove;
+
+    private int oopsUserTurnSentForRoomUpdateSeq;
+
+    private bool oopsRoomIsFinished;
+    private string oopsRoomWinnerUserId;
+
+    public bool ShouldDeferOopsCardReturn(CardClickHandler handler)
+    {
+        if (!IsPlayWithOopsMode) return false;
+        if (handler == null) return false;
+
+        return moveInputLockActive || oopsUserTurnInFlight || oopsFinalizeCardOnNextUserTurn;
+    }
+
+    public void DeferOopsCardReturn(CardClickHandler handler)
+    {
+        if (!IsPlayWithOopsMode) return;
+        if (handler == null) return;
+
+        oopsPendingCardReturnHandler = handler;
+        oopsFinalizeCardOnNextUserTurn = true;
+    }
+
+    public void NotifyOopsServerSwapAnimationCompleted(PlayerPiece movedPiece)
+    {
+        if (!IsPlayWithOopsMode) return;
+        if (gameOver || !modeSelected) return;
+
+        // Keep the card visible until the server confirms the next turn via userTurn.
+        if (currentCardHandler != null)
+        {
+            DeferOopsCardReturn(currentCardHandler);
+        }
+
+        oopsUserTurnSendToken++;
+        StartCoroutine(SendOopsUserTurnAfterVisualSettle(movedPiece, oopsUserTurnSendToken));
+    }
+
+    public void LogOopsMove(PlayerPiece piece, int fromIndex, int toIndex, string reason)
+    {
+        if (!IsPlayWithOopsMode) return;
+        if (piece == null) return;
+
+        string why = string.IsNullOrEmpty(reason) ? "MOVE" : reason;
+        Debug.Log($"<color=#00E5FF>OOPS MOVE</color>: {why} P{piece.playerNumber}-#{piece.pieceNumber} {fromIndex}->{toIndex}");
+    }
+
     private bool oopsAutoCardOpenSentThisTurn;
     private bool oopsAutoMoveSentThisTurn;
     private bool oopsAutoSplitFirstSentThisTurn;
@@ -224,6 +304,14 @@ public class GameManager : MonoBehaviour
 
     private readonly Dictionary<string, int> oopsPendingOriginalStepsByPawnKey = new Dictionary<string, int>();
 
+    private struct OopsQueuedPawnMove
+    {
+        public int TargetIndex;
+        public int OriginalSteps;
+    }
+
+    private readonly Dictionary<string, OopsQueuedPawnMove> oopsQueuedPawnMovesByKey = new Dictionary<string, OopsQueuedPawnMove>();
+
     private void ResetOopsCardAndModesForNextTurn()
     {
         if (currentCardHandler != null)
@@ -250,10 +338,59 @@ public class GameManager : MonoBehaviour
         selectedPieceForCard12 = null;
         isSorryMode = false;
         selectedPieceForSorry = null;
+
+        oopsQueuedPawnMovesByKey.Clear();
+    }
+
+    private void QueueOopsPawnMove(int mappedPlayerNumber, int pawnId, int targetIndex, int originalSteps)
+    {
+        if (!IsPlayWithOopsMode) return;
+        if (mappedPlayerNumber <= 0 || pawnId <= 0) return;
+        if (targetIndex < 0) return;
+
+        string key = $"{mappedPlayerNumber}:{pawnId}";
+        oopsQueuedPawnMovesByKey[key] = new OopsQueuedPawnMove
+        {
+            TargetIndex = targetIndex,
+            OriginalSteps = originalSteps
+        };
+    }
+
+    private bool TryConsumeQueuedOopsPawnMove(PlayerPiece piece, out int targetIndex, out int originalSteps)
+    {
+        targetIndex = -1;
+        originalSteps = 0;
+
+        if (!IsPlayWithOopsMode) return false;
+        if (piece == null) return false;
+
+        string key = $"{piece.playerNumber}:{piece.pieceNumber}";
+        if (!oopsQueuedPawnMovesByKey.TryGetValue(key, out OopsQueuedPawnMove queued)) return false;
+
+        oopsQueuedPawnMovesByKey.Remove(key);
+        targetIndex = queued.TargetIndex;
+        originalSteps = queued.OriginalSteps;
+        return true;
+    }
+
+    private IEnumerator StartQueuedOopsPawnMoveNextFrame(PlayerPiece piece, int targetIndex, int originalSteps)
+    {
+        yield return null;
+        if (!IsPlayWithOopsMode) yield break;
+        if (piece == null) yield break;
+        if (piece.IsBusy) yield break;
+
+        piece.SyncCurrentPathIndexFromTransform();
+        if (piece.GetCurrentPathIndex() == targetIndex) yield break;
+
+        piece.MovePieceToPathIndex(targetIndex, originalSteps);
     }
 
     private int oopsRoomUpdateSequence;
     private Coroutine oopsDeferredBaseApplyCoroutine;
+
+    private int oopsPendingAnimatedMoveCompletions;
+    private int oopsPendingAnimatedMoveSequence;
 
     private bool oopsCardOpenRequestInFlight;
 
@@ -294,6 +431,15 @@ public class GameManager : MonoBehaviour
         }
 
         string chosenMoveType = steps < 0 ? "BACKWARD" : "FORWARD";
+
+        if (isSplitMode)
+        {
+            isSplitMode = false;
+            remainingSteps = 0;
+            selectedPieceForSplit = null;
+            oopsSplitAwaitingSecondPiece = false;
+            oopsSplitMoveSent = false;
+        }
 
         Dictionary<string, object> payload = new Dictionary<string, object>
         {
@@ -568,6 +714,345 @@ public class GameManager : MonoBehaviour
         hasOopsPlayingCardListener = true;
     }
 
+    private void EnsureOopsUserTurnListener()
+    {
+        if (!IsPlayWithOopsMode) return;
+        if (hasOopsUserTurnListener) return;
+
+        SocketConnection socket = SocketConnection.Instance;
+        if (socket == null || socket.CurrentState != SocketState.Connected) return;
+
+        socket.ListenReplace("userTurn", OnOopsUserTurnReceived);
+        hasOopsUserTurnListener = true;
+    }
+
+    private void OnOopsUserTurnReceived(object data)
+    {
+        if (!IsPlayWithOopsMode) return;
+
+        oopsUserTurnInFlight = false;
+        oopsPendingAnimatedMoveCompletions = 0;
+
+        if (oopsRoomIsFinished)
+        {
+            oopsUserTurnQueued = false;
+            oopsQueuedUserTurnMovedPiece = null;
+            oopsQueuedUserTurnReason = null;
+            oopsQueuedUserTurnMovedPieces.Clear();
+            return;
+        }
+
+        int previousPlayer = currentPlayer;
+        string previousTurnUserId = oopsCurrentTurnUserId;
+
+        object payload = data;
+        if (payload is IList list)
+        {
+            if (list.Count > 0)
+            {
+                payload = list[0];
+            }
+        }
+
+        IDictionary<string, object> root = AsStringObjectDict(payload);
+        if (root == null)
+        {
+            ApplyOopsRoomStateFromServerUpdate(data, false);
+            return;
+        }
+
+        IDictionary<string, object> wrapped = GetDict(root, "data");
+        if (wrapped != null)
+        {
+            root = wrapped;
+        }
+
+        string newTurnUserIdFromEvent = GetString(root, "turnIndex", string.Empty);
+        if (string.IsNullOrEmpty(newTurnUserIdFromEvent))
+        {
+            IDictionary<string, object> roomDict0 = GetDict(root, "room");
+            if (roomDict0 != null)
+            {
+                newTurnUserIdFromEvent = GetString(roomDict0, "turnIndex", string.Empty);
+            }
+        }
+
+        Debug.Log($"PlayWithOops: userTurn recv | turnIndex={newTurnUserIdFromEvent} movingPlayerId={oopsLastMovingPlayerId} cardPicked={cardPicked} handler={(currentCardHandler != null ? currentCardHandler.name : "<null>")} finalizeArmed={oopsFinalizeCardOnNextUserTurn}");
+
+        oopsLastUserTurnCardTime = GetFloat(root, "cardTime", oopsLastUserTurnCardTime);
+        oopsLastUserTurnPlayCardTime = GetFloat(root, "playCardTime", oopsLastUserTurnPlayCardTime);
+
+        if (root.TryGetValue("turnIndex", out object topTurnIndex) && topTurnIndex != null)
+        {
+            IDictionary<string, object> roomDict = GetDict(root, "room");
+            if (roomDict != null)
+            {
+                roomDict["turnIndex"] = topTurnIndex;
+            }
+        }
+
+        if (root.ContainsKey("room"))
+        {
+            ApplyOopsRoomStateFromServerUpdate(root, false);
+        }
+        else
+        {
+            ApplyOopsRoomStateFromServerUpdate(data, false);
+        }
+
+        bool didTurnAdvance = currentPlayer != previousPlayer;
+        string compareFrom = !string.IsNullOrEmpty(oopsFinalizeArmedTurnUserId) ? oopsFinalizeArmedTurnUserId : previousTurnUserId;
+        if (!string.IsNullOrEmpty(compareFrom) && !string.IsNullOrEmpty(newTurnUserIdFromEvent))
+        {
+            didTurnAdvance = !string.Equals(compareFrom, newTurnUserIdFromEvent, StringComparison.Ordinal);
+        }
+
+        object cardOpen = root.TryGetValue("cardOpen", out object co) ? co : null;
+        if (cardOpen != null)
+        {
+            OnOopsCardOpenReceived(cardOpen);
+        }
+
+        object playCard = root.TryGetValue("playCard", out object pc) ? pc : null;
+        if (playCard != null)
+        {
+            OnOopsPlayingCardReceived(playCard);
+        }
+
+        // Single rule (requested): playCard's movingPlayerId != userTurn.turnIndex => return card to start.
+        bool shouldReturnCardNow = !string.IsNullOrEmpty(oopsLastMovingPlayerId)
+            && !string.IsNullOrEmpty(newTurnUserIdFromEvent)
+            && !string.Equals(oopsLastMovingPlayerId, newTurnUserIdFromEvent, StringComparison.Ordinal);
+
+        if (shouldReturnCardNow)
+        {
+            Debug.LogWarning($"PlayWithOops: userTurn mismatch -> return card | movingPlayerId={oopsLastMovingPlayerId} turnIndex={newTurnUserIdFromEvent}");
+
+            if (oopsPendingCardReturnHandler == null)
+            {
+                oopsPendingCardReturnHandler = currentCardHandler;
+                if (oopsPendingCardReturnHandler == null)
+                {
+                    oopsPendingCardReturnHandler = CardClickHandler.CurrentClickableCard;
+                }
+            }
+
+            if (oopsPendingCardReturnHandler != null)
+            {
+                DeferOopsCardReturn(oopsPendingCardReturnHandler);
+            }
+
+            oopsFinalizeCardOnNextUserTurn = true;
+            didTurnAdvance = true;
+        }
+
+        // Return/reset ONLY when the single rule triggers.
+        if (oopsFinalizeCardOnNextUserTurn && shouldReturnCardNow)
+        {
+            Debug.LogWarning($"PlayWithOops: userTurn finalize -> ReturnCardToStart | pendingHandler={(oopsPendingCardReturnHandler != null ? oopsPendingCardReturnHandler.name : "<null>")}");
+            oopsFinalizeCardOnNextUserTurn = false;
+            oopsFinalizeArmedTurnUserId = null;
+            oopsFinalizeArmedPlayer = 0;
+            oopsOpenCardOwnerUserId = null;
+            oopsLastMovingPlayerId = null;
+
+            if (oopsPendingCardReturnHandler == null)
+            {
+                oopsPendingCardReturnHandler = currentCardHandler;
+            }
+
+            if (oopsPendingCardReturnHandler != null)
+            {
+                oopsPendingCardReturnHandler.ReturnCardToStart();
+            }
+            oopsPendingCardReturnHandler = null;
+
+            isSplitMode = false;
+            remainingSteps = 0;
+            selectedPieceForSplit = null;
+            oopsSplitAwaitingSecondPiece = false;
+            oopsSplitMoveSent = false;
+
+            isCard10Mode = false;
+            isCard11Mode = false;
+            selectedPieceForCard11 = null;
+            isCard12Mode = false;
+            selectedPieceForCard12 = null;
+            isSorryMode = false;
+            selectedPieceForSorry = null;
+
+            cardPicked = false;
+            currentCardValue = 0;
+            currentCardPower1 = "";
+            currentCardPower2 = "";
+            currentCardHandler = null;
+        }
+
+        StopAllTurnPieceHighlights();
+
+        // Ensure deck + input reflect whose turn it is (server-authoritative).
+        suppressHumanInput = currentPlayer != Mathf.Clamp(localPlayerNumber, 1, 4);
+        UpdateTurnIndicatorUI();
+        UpdateDeckTintForTurn();
+        UpdatePiecesInteractivityForOopsTurn();
+
+        // If another move finished while a previous userTurn was still in-flight (common during split 6+1 etc),
+        // flush the queued request now.
+        bool hasQueued = oopsQueuedUserTurnMovedPieces.Count > 0 || oopsUserTurnQueued;
+        if (!oopsUserTurnInFlight && hasQueued)
+        {
+            PlayerPiece queuedPiece = null;
+            if (oopsQueuedUserTurnMovedPieces.Count > 0)
+            {
+                queuedPiece = oopsQueuedUserTurnMovedPieces.Dequeue();
+            }
+            else if (oopsUserTurnQueued)
+            {
+                // Backward-compatible fallback for any older queued state.
+                queuedPiece = oopsQueuedUserTurnMovedPiece;
+            }
+
+            string queuedReason = oopsUserTurnQueued ? oopsQueuedUserTurnReason : null;
+            oopsUserTurnQueued = false;
+            oopsQueuedUserTurnMovedPiece = null;
+            oopsQueuedUserTurnReason = null;
+
+            if (queuedPiece != null)
+            {
+                oopsUserTurnSendToken++;
+                StartCoroutine(SendOopsUserTurnAfterVisualSettle(queuedPiece, oopsUserTurnSendToken));
+            }
+            else if (!string.IsNullOrEmpty(queuedReason))
+            {
+                TrySendOopsUserTurnForCurrentPlayer(queuedReason);
+            }
+        }
+    }
+
+    private IEnumerator SendOopsUserTurnAfterSnapFallback(int updateSeq)
+    {
+        yield return null;
+        if (!IsPlayWithOopsMode) yield break;
+        if (updateSeq != oopsLastRoomUpdateSeqWithSnapMove) yield break;
+        if (updateSeq == oopsUserTurnSentForRoomUpdateSeq) yield break;
+        if (oopsPendingAnimatedMoveCompletions > 0) yield break;
+        if (oopsUserTurnInFlight) yield break;
+
+        oopsUserTurnSentForRoomUpdateSeq = updateSeq;
+        TrySendOopsUserTurnForCurrentPlayer("snap-move");
+    }
+
+    private void TrySendOopsUserTurnForCompletedMove(PlayerPiece movedPiece)
+    {
+        if (!IsPlayWithOopsMode) return;
+
+        if (oopsRoomIsFinished)
+        {
+            Debug.LogWarning("PlayWithOops: userTurn send skipped (room finished)");
+            return;
+        }
+
+        if (oopsUserTurnInFlight)
+        {
+            // Another move can complete while a previous userTurn is still in-flight (e.g., split remainder).
+            // Queue the request so we send it immediately after the response arrives.
+            if (movedPiece != null)
+            {
+                oopsQueuedUserTurnMovedPieces.Enqueue(movedPiece);
+            }
+            oopsUserTurnQueued = true;
+            oopsQueuedUserTurnMovedPiece = null;
+            oopsQueuedUserTurnReason = null;
+            Debug.LogWarning($"PlayWithOops: userTurn send queued (in-flight already true) queuedMoves={oopsQueuedUserTurnMovedPieces.Count}");
+            return;
+        }
+
+        if (movedPiece == null)
+        {
+            Debug.LogWarning("PlayWithOops: userTurn send skipped (movedPiece null)");
+            return;
+        }
+
+        bool shouldSend = movedPiece.playerNumber == LocalPlayerNumber || IsBotPlayer(movedPiece.playerNumber);
+        if (!shouldSend)
+        {
+            Debug.LogWarning($"PlayWithOops: userTurn send skipped (not local/bot) movedP={movedPiece.playerNumber} localP={LocalPlayerNumber}");
+            return;
+        }
+
+        SocketConnection socket = SocketConnection.Instance;
+        if (socket == null || socket.CurrentState != SocketState.Connected)
+        {
+            Debug.LogWarning($"PlayWithOops: userTurn send skipped (socket not connected) state={(socket != null ? socket.CurrentState.ToString() : "<null>")}");
+            return;
+        }
+
+        string roomId = currentRoomId;
+        if (string.IsNullOrEmpty(roomId))
+        {
+            Debug.LogWarning("PlayWithOops: userTurn send skipped (roomId empty)");
+            return;
+        }
+
+        EnsureOopsUserTurnListener();
+        oopsUserTurnInFlight = true;
+        Debug.Log($"PlayWithOops: SOCKET SEND -> userTurn roomId={roomId} movedP={movedPiece.playerNumber} pawnId={movedPiece.pieceNumber}");
+        socket.SendWithAck("userTurn", new { roomId = roomId });
+    }
+
+    private void TrySendOopsUserTurnForCurrentPlayer(string reason)
+    {
+        if (!IsPlayWithOopsMode) return;
+
+        if (oopsRoomIsFinished)
+        {
+            Debug.LogWarning($"PlayWithOops: userTurn send skipped (room finished) reason={reason}");
+            return;
+        }
+
+        if (oopsUserTurnInFlight)
+        {
+            oopsUserTurnQueued = true;
+            oopsQueuedUserTurnMovedPiece = null;
+            oopsQueuedUserTurnReason = reason;
+            Debug.LogWarning($"PlayWithOops: userTurn send queued (in-flight already true) reason={reason} queuedMoves={oopsQueuedUserTurnMovedPieces.Count}");
+            return;
+        }
+
+        bool shouldSend = currentPlayer == LocalPlayerNumber || IsBotPlayer(currentPlayer);
+        if (!shouldSend)
+        {
+            Debug.LogWarning($"PlayWithOops: userTurn send skipped (not local/bot) currentP={currentPlayer} localP={LocalPlayerNumber} reason={reason}");
+            return;
+        }
+
+        SocketConnection socket = SocketConnection.Instance;
+        if (socket == null || socket.CurrentState != SocketState.Connected)
+        {
+            Debug.LogWarning($"PlayWithOops: userTurn send skipped (socket not connected) state={(socket != null ? socket.CurrentState.ToString() : "<null>")} reason={reason}");
+            return;
+        }
+
+        string roomId = currentRoomId;
+        if (string.IsNullOrEmpty(roomId))
+        {
+            Debug.LogWarning($"PlayWithOops: userTurn send skipped (roomId empty) reason={reason}");
+            return;
+        }
+
+        EnsureOopsUserTurnListener();
+        oopsUserTurnInFlight = true;
+        Debug.Log($"PlayWithOops: SOCKET SEND -> userTurn roomId={roomId} currentP={currentPlayer} reason={reason}");
+        socket.SendWithAck("userTurn", new { roomId = roomId });
+    }
+
+    private IEnumerator SendOopsUserTurnAfterVisualSettle(PlayerPiece movedPiece, int token)
+    {
+        yield return new WaitForEndOfFrame();
+        if (token != oopsUserTurnSendToken) yield break;
+        TrySendOopsUserTurnForCompletedMove(movedPiece);
+    }
+
     private void OnOopsPlayCardAckReceived(object ack)
     {
         if (!IsPlayWithOopsMode) return;
@@ -674,8 +1159,46 @@ public class GameManager : MonoBehaviour
 
         IDictionary<string, object> room = GetDict(root, "room") ?? root;
 
+        string roomStatus = GetString(room, "status", string.Empty);
+        string winnerUserId = GetString(room, "winner", string.Empty);
+        bool isFinishedNow = string.Equals(roomStatus, "FINISHED", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrEmpty(winnerUserId);
+        if (isFinishedNow)
+        {
+            oopsRoomIsFinished = true;
+            oopsRoomWinnerUserId = winnerUserId;
+            oopsUserTurnQueued = false;
+            oopsQueuedUserTurnMovedPiece = null;
+            oopsQueuedUserTurnReason = null;
+            oopsQueuedUserTurnMovedPieces.Clear();
+            oopsUserTurnInFlight = false;
+        }
+
+        string movingPlayerId = GetString(room, "movingPlayerId", string.Empty);
+        if (!string.IsNullOrEmpty(movingPlayerId))
+        {
+            oopsLastMovingPlayerId = movingPlayerId;
+            Debug.Log($"PlayWithOops: room update movingPlayerId={oopsLastMovingPlayerId}");
+        }
+
         string chosenMoveType = GetString(room, "chosenMoveType", string.Empty);
         bool wantsSwapAnimation = string.Equals(chosenMoveType, "SWAP", StringComparison.OrdinalIgnoreCase);
+        bool wasSplitInProgress = oopsSplitInProgress;
+        oopsSplitInProgress = string.Equals(chosenMoveType, "SPLIT", StringComparison.OrdinalIgnoreCase);
+
+        // If we deferred a local/bot userTurn send because the server still considered split in progress,
+        // flush it as soon as the room state indicates split is no longer active.
+        if (wasSplitInProgress && !oopsSplitInProgress && oopsDeferredUserTurnSend)
+        {
+            PlayerPiece deferredPiece = oopsDeferredUserTurnMovedPiece;
+            oopsDeferredUserTurnSend = false;
+            oopsDeferredUserTurnMovedPiece = null;
+
+            if (deferredPiece != null)
+            {
+                oopsUserTurnSendToken++;
+                StartCoroutine(SendOopsUserTurnAfterVisualSettle(deferredPiece, oopsUserTurnSendToken));
+            }
+        }
 
         IList players = GetList(room, "players");
         if (players == null || players.Count == 0)
@@ -704,6 +1227,7 @@ public class GameManager : MonoBehaviour
 
         int previousPlayer = currentPlayer;
         string turnUserId = ResolveTurnUserId(room, players, string.Empty);
+        oopsCurrentTurnUserId = turnUserId;
         int desiredPlayer = ResolveMappedPlayerFromTurnUserId(turnUserId, userIdToMappedPlayer, players);
 
         if (Time.unscaledTime < oopsSuppressServerTurnUntil && desiredPlayer == oopsSuppressServerTurnPlayer)
@@ -730,7 +1254,21 @@ public class GameManager : MonoBehaviour
 
         if (!moveInputLockActive && previousPlayer != currentPlayer)
         {
-            ResetOopsCardAndModesForNextTurn();
+            // In PlayWithOops, do NOT return/reset the open card purely on room/playCard updates.
+            // The card should return only when the server confirms the turn via userTurn.
+            if (IsPlayWithOopsMode)
+            {
+                EnsureOopsUserTurnListener();
+
+                if (currentCardHandler != null)
+                {
+                    DeferOopsCardReturn(currentCardHandler);
+                }
+            }
+            else
+            {
+                ResetOopsCardAndModesForNextTurn();
+            }
         }
 
         Debug.Log($"<color=#00BCD4>PlayWithOops</color>: roomId={currentRoomId} players={players.Count} turnUserId={turnUserId} mappedCurrentPlayer={currentPlayer}");
@@ -741,6 +1279,10 @@ public class GameManager : MonoBehaviour
 
         List<PlayerPiece> deferredBasePieces = new List<PlayerPiece>();
         List<PlayerPiece> movedPiecesThisUpdate = new List<PlayerPiece>();
+        List<PlayerPiece> animatedPiecesThisUpdate = new List<PlayerPiece>();
+        bool hadSnappedMoveThisUpdate = false;
+
+        bool canAnimateNonMoveUpdates = hasAppliedSocketGameStartData;
 
         List<PlayerPiece> swapPieces = wantsSwapAnimation ? new List<PlayerPiece>(2) : null;
         List<int> swapTargetIndices = wantsSwapAnimation ? new List<int>(2) : null;
@@ -794,6 +1336,13 @@ public class GameManager : MonoBehaviour
                 {
                     if (isMove)
                     {
+                        piece.SyncCurrentPathIndexFromTransform();
+                        if (!piece.IsBusy && piece.GetCurrentPathIndex() == position)
+                        {
+                            piece.ApplyServerPathIndexState(position);
+                            continue;
+                        }
+
                         if (wantsSwapAnimation)
                         {
                             swapPieces.Add(piece);
@@ -803,7 +1352,15 @@ public class GameManager : MonoBehaviour
 
                         if (piece.IsBusy)
                         {
-                            Debug.Log($"PlayWithOops: skipping animate for busy piece mappedP={mappedPlayerNumber} pawnId={pawnId} -> position={position}");
+                            int stored = 0;
+                            string busyKey = $"{mappedPlayerNumber}:{pawnId}";
+                            if (oopsPendingOriginalStepsByPawnKey.TryGetValue(busyKey, out int stepsValue))
+                            {
+                                stored = stepsValue;
+                                oopsPendingOriginalStepsByPawnKey.Remove(busyKey);
+                            }
+                            QueueOopsPawnMove(mappedPlayerNumber, pawnId, position, stored);
+                            Debug.Log($"PlayWithOops: queued animate for busy piece mappedP={mappedPlayerNumber} pawnId={pawnId} -> position={position}");
                             continue;
                         }
                         Debug.Log($"PlayWithOops: animate mappedP={mappedPlayerNumber} pawnId={pawnId} -> position={position}");
@@ -843,10 +1400,44 @@ public class GameManager : MonoBehaviour
 
                         piece.MovePieceToPathIndex(animateToIndex, originalSteps);
                         movedPiecesThisUpdate.Add(piece);
+                        animatedPiecesThisUpdate.Add(piece);
                     }
                     else
                     {
-                        piece.ApplyServerPathIndexState(position);
+                        piece.SyncCurrentPathIndexFromTransform();
+                        int previousIndex = piece.GetCurrentPathIndex();
+
+                        if (piece.IsBusy && previousIndex != position)
+                        {
+                            QueueOopsPawnMove(mappedPlayerNumber, pawnId, position, 0);
+                            Debug.Log($"PlayWithOops: queued snap for busy piece mappedP={mappedPlayerNumber} pawnId={pawnId} {previousIndex}->{position} isMove=false");
+                            continue;
+                        }
+
+                        bool shouldForceAnimate = canAnimateNonMoveUpdates
+                                                 && previousIndex != position
+                                                 && !string.IsNullOrEmpty(movingPlayerId)
+                                                 && string.Equals(serverUserId, movingPlayerId, StringComparison.OrdinalIgnoreCase)
+                                                 && !piece.IsBusy
+                                                 && !wantsSwapAnimation;
+
+                        if (shouldForceAnimate)
+                        {
+                            Debug.LogWarning($"PlayWithOops: FORCE ANIMATE (isMove=false) mappedP={mappedPlayerNumber} pawnId={pawnId} {previousIndex}->{position} movingPlayerId={movingPlayerId}");
+                            piece.MovePieceToPathIndex(position, 0);
+                            movedPiecesThisUpdate.Add(piece);
+                            animatedPiecesThisUpdate.Add(piece);
+                        }
+                        else
+                        {
+                            piece.ApplyServerPathIndexState(position);
+                            if (previousIndex != position)
+                            {
+                                movedPiecesThisUpdate.Add(piece);
+                                hadSnappedMoveThisUpdate = true;
+                                Debug.LogWarning($"PlayWithOops: SNAP move applied mappedP={mappedPlayerNumber} pawnId={pawnId} {previousIndex}->{position} isMove=false");
+                            }
+                        }
                     }
                 }
                 else
@@ -885,7 +1476,28 @@ public class GameManager : MonoBehaviour
                 {
                     PlayerPiece p = swapPieces[i];
                     if (p == null) continue;
-                    p.ApplyServerPathIndexState(swapTargetIndices[i]);
+                    p.SyncCurrentPathIndexFromTransform();
+                    int previousIndex = p.GetCurrentPathIndex();
+
+                    int targetIndex = swapTargetIndices[i];
+                    bool canAnimateSwapFallback = hasAppliedSocketGameStartData && previousIndex != targetIndex && !p.IsBusy;
+                    if (canAnimateSwapFallback)
+                    {
+                        Debug.LogWarning($"PlayWithOops: FORCE ANIMATE SWAP fallback mappedP={p.playerNumber} pawnId={p.pieceNumber} {previousIndex}->{targetIndex}");
+                        p.MovePieceToPathIndex(targetIndex, 0);
+                        movedPiecesThisUpdate.Add(p);
+                        animatedPiecesThisUpdate.Add(p);
+                    }
+                    else
+                    {
+                        p.ApplyServerPathIndexState(targetIndex);
+                        if (previousIndex != targetIndex)
+                        {
+                            movedPiecesThisUpdate.Add(p);
+                            hadSnappedMoveThisUpdate = true;
+                            Debug.LogWarning($"PlayWithOops: SNAP SWAP fallback applied mappedP={p.playerNumber} pawnId={p.pieceNumber} {previousIndex}->{targetIndex}");
+                        }
+                    }
                 }
             }
         }
@@ -904,6 +1516,32 @@ public class GameManager : MonoBehaviour
                     oopsDeferredBaseApplyCoroutine = null;
                 }
                 oopsDeferredBaseApplyCoroutine = StartCoroutine(ApplyDeferredOopsBaseStatesAfterMoves(updateSeq, deferredBasePieces, movedPiecesThisUpdate));
+            }
+        }
+
+        // Track how many pawn animations are expected to complete for this room update.
+        // For bot/opponent moves (including split where multiple pawns can animate), we only emit userTurn
+        // after the last animated pawn completes.
+        if (animatedPiecesThisUpdate.Count > 0)
+        {
+            oopsPendingAnimatedMoveSequence = updateSeq;
+            oopsPendingAnimatedMoveCompletions = animatedPiecesThisUpdate.Count;
+        }
+        else
+        {
+            oopsPendingAnimatedMoveCompletions = 0;
+        }
+
+        if (hadSnappedMoveThisUpdate && movedPiecesThisUpdate.Count > 0)
+        {
+            oopsLastRoomUpdateSeqWithSnapMove = updateSeq;
+
+            int movingMappedPlayer = ResolveMappedPlayerForServerUserId(movingPlayerId, userIdToMappedPlayer, -1);
+            bool moverIsLocalOrBot = movingMappedPlayer == LocalPlayerNumber || IsBotPlayer(movingMappedPlayer);
+            if (moverIsLocalOrBot && animatedPiecesThisUpdate.Count == 0)
+            {
+                Debug.LogWarning($"PlayWithOops: snap-move detected; scheduling userTurn send (seq={updateSeq}) movingId={movingPlayerId} movingMappedP={movingMappedPlayer} movedPieces={movedPiecesThisUpdate.Count}");
+                StartCoroutine(SendOopsUserTurnAfterSnapFallback(updateSeq));
             }
         }
 
@@ -1319,6 +1957,10 @@ public class GameManager : MonoBehaviour
         }
 
         string uid = GetString(root, "user_id", string.Empty);
+        if (!string.IsNullOrEmpty(uid))
+        {
+            oopsOpenCardOwnerUserId = uid;
+        }
 
         string localUser = UserId;
         bool isLocalUid = !string.IsNullOrEmpty(uid) && !string.IsNullOrEmpty(localUser) && string.Equals(uid, localUser, StringComparison.OrdinalIgnoreCase);
@@ -1384,6 +2026,7 @@ public class GameManager : MonoBehaviour
         int backwardSteps = GetInt(card, "backward_steps", 0);
         bool isSplit = GetBool(card, "is_split", false);
         bool isSwap = GetBool(card, "is_swap", false);
+        oopsSplitInProgress = isSplit || string.Equals(moveType, "SPLIT", StringComparison.OrdinalIgnoreCase);
 
         string power1 = string.Empty;
         string power2 = string.Empty;
@@ -1490,7 +2133,7 @@ public class GameManager : MonoBehaviour
             currentCardPower2 = power2 ?? "";
 
             isCard11Mode = (currentCardValue == 11) || isSwap || string.Equals(moveType, "SWAP", StringComparison.OrdinalIgnoreCase);
-            isSplitMode = (cardValue == 7) || isSplit || string.Equals(moveType, "SPLIT", StringComparison.OrdinalIgnoreCase);
+            isSplitMode = isSplit || string.Equals(moveType, "SPLIT", StringComparison.OrdinalIgnoreCase);
             remainingSteps = isSplitMode ? 7 : 0;
             selectedPieceForSplit = null;
 
@@ -1834,15 +2477,10 @@ public class GameManager : MonoBehaviour
         }
 
         // Still stuck on same player's opened card: if no legal action exists, force advance locally.
-        bool hasLegal = true;
-        if (isCard11Mode || currentCardValue == 11)
-        {
-            hasLegal = HasAnyLegalActionForCard11SwapOrForward(expectedPlayer);
-        }
-
+        bool hasLegal = HasAnyLegalActionForPickedCard(expectedPlayer, currentCardValue);
         if (!hasLegal)
         {
-            ForceAdvanceOopsTurnLocally("opponent cardOpen: no legal actions (watchdog)");
+            Debug.LogWarning($"PlayWithOops: opponent has no legal actions for card={currentCardValue} (watchdog). Waiting for server userTurn.");
         }
     }
 
@@ -1857,15 +2495,10 @@ public class GameManager : MonoBehaviour
         if (currentPlayer != LocalPlayerNumber) yield break;
         if (!cardPicked || currentCardHandler == null || currentCardHandler != expectedCard) yield break;
 
-        bool hasLegal = true;
-        if (isCard11Mode || currentCardValue == 11)
-        {
-            hasLegal = HasAnyLegalActionForCard11SwapOrForward(expectedPlayer);
-        }
-
+        bool hasLegal = HasAnyLegalActionForPickedCard(expectedPlayer, currentCardValue);
         if (!hasLegal)
         {
-            ForceAdvanceOopsTurnLocally("local cardOpen: no legal actions");
+            Debug.LogWarning($"PlayWithOops: local has no legal actions for card={currentCardValue}. Waiting for server userTurn.");
         }
     }
 
@@ -4512,6 +5145,23 @@ public class GameManager : MonoBehaviour
         return fallback;
     }
 
+    private static float GetFloat(IDictionary<string, object> dict, string key, float fallback)
+    {
+        if (dict == null || string.IsNullOrEmpty(key)) return fallback;
+        if (!dict.TryGetValue(key, out object value) || value == null) return fallback;
+        try
+        {
+            if (value is float f) return f;
+            if (value is double d) return (float)d;
+            if (value is int i) return i;
+            if (value is long l) return l;
+            if (value is string s && float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float parsed)) return parsed;
+            return Convert.ToSingle(value);
+        }
+        catch { }
+        return fallback;
+    }
+
     private static string ResolveTurnUserId(IDictionary<string, object> room, IList players, string fallback)
     {
         if (room == null) return fallback;
@@ -4814,8 +5464,12 @@ public class GameManager : MonoBehaviour
             if (sameTransform || sameWorldPos)
             {
                 Debug.Log($"💥 BUMP! Player {moverPlayer} Piece {movedPiece.pieceNumber} landed on opponent piece {other.pieceNumber}. Sending opponent back to START.");
+                other.SyncCurrentPathIndexFromTransform();
+                int fromIndex = other.GetCurrentPathIndex();
                 other.ReturnToHome();
                 other.SyncCurrentPathIndexFromTransform();
+                int toIndex = other.GetCurrentPathIndex();
+                LogOopsMove(other, fromIndex, toIndex, "KILL");
                 return;
             }
         }
@@ -4859,8 +5513,12 @@ public class GameManager : MonoBehaviour
             if (sameTransform || sameWorldPos)
             {
                 Debug.Log($"💥 SLIDE BUMP! Piece {movedPiece.pieceNumber} landed on piece {other.pieceNumber}. Sending it back to START.");
+                other.SyncCurrentPathIndexFromTransform();
+                int fromIndex = other.GetCurrentPathIndex();
                 other.ReturnToHome();
                 other.SyncCurrentPathIndexFromTransform();
+                int toIndex = other.GetCurrentPathIndex();
+                LogOopsMove(other, fromIndex, toIndex, "KILL");
             }
         }
     }
@@ -5743,6 +6401,7 @@ public class GameManager : MonoBehaviour
         hasOopsPlayingCardListener = false;
         serverUserIdByMappedPlayerNumber.Clear();
         oopsPendingOriginalStepsByPawnKey.Clear();
+        oopsQueuedPawnMovesByKey.Clear();
 
         oopsSplitAwaitingSecondPiece = false;
         oopsSplitMoveSent = false;
@@ -6211,6 +6870,11 @@ public class GameManager : MonoBehaviour
         isSplitMode = false;
         remainingSteps = 0;
         selectedPieceForSplit = null;
+        oopsSplitAwaitingSecondPiece = false;
+        oopsSplitMoveSent = false;
+        oopsSplitInProgress = false;
+        oopsSplitFirstPawnId = 0;
+        oopsSplitFirstSteps = 0;
         isCard10Mode = false;
         isCard11Mode = false;
         selectedPieceForCard11 = null;
@@ -6423,11 +7087,6 @@ public class GameManager : MonoBehaviour
                 StopCoroutine(oopsLocalNoMoveWatchdog);
                 oopsLocalNoMoveWatchdog = null;
             }
-
-            if (isCard11Mode || currentCardValue == 11)
-            {
-                oopsLocalNoMoveWatchdog = StartCoroutine(OopsLocalNoMoveWatchdogRoutine(currentPlayer, currentCardHandler));
-            }
         }
 
         // Rule: Jo koi pan move possible nathi to turn SKIP (special cards mate)
@@ -6452,14 +7111,8 @@ public class GameManager : MonoBehaviour
             }
         }
 
-        if (IsPlayWithOopsMode && currentPlayer == LocalPlayerNumber && !queuedSkipTurn)
-        {
-            if (!HasAnyLegalActionForPickedCard(currentPlayer, cardValue))
-            {
-                StartCoroutine(SkipTurnAfterDelay());
-                queuedSkipTurn = true;
-            }
-        }
+        // In PlayWithOops, do not locally scan pieces to determine if a move is possible.
+        // The server will advance the turn; client should not auto-skip based on local checks.
 
         // Do-or-die rule for dual-power cards:
         // Auto-execute ONLY when exactly one legal action exists across all pieces/options.
@@ -7564,7 +8217,19 @@ public class GameManager : MonoBehaviour
 
         if (IsPlayWithOopsMode)
         {
-            ForceAdvanceOopsTurnLocally("skip turn: no legal action");
+            if (currentCardHandler != null)
+            {
+                DeferOopsCardReturn(currentCardHandler);
+            }
+
+            oopsFinalizeCardOnNextUserTurn = true;
+            oopsPendingCardReturnHandler = currentCardHandler;
+            suppressHumanInput = true;
+
+            oopsFinalizeArmedTurnUserId = oopsCurrentTurnUserId;
+            oopsFinalizeArmedPlayer = currentPlayer;
+
+            Debug.LogWarning("PlayWithOops: SkipTurnAfterDelay no-move detected. Not sending userTurn and not advancing locally; waiting for server.");
             yield break;
         }
 
@@ -7745,11 +8410,22 @@ public class GameManager : MonoBehaviour
 
         if (IsPlayWithOopsMode)
         {
+            if (movedPiece != null && movedPiece.playerNumber != LocalPlayerNumber && oopsPendingAnimatedMoveCompletions > 0)
+            {
+                oopsPendingAnimatedMoveCompletions = Mathf.Max(0, oopsPendingAnimatedMoveCompletions - 1);
+            }
+
             // IMPORTANT: For +7 split, the server can send 2 separate moves.
             // We must keep the card in-place until BOTH parts complete.
             // This must also work for opponent moves where selectedPieceForSplit may not be set locally.
-            if (isSplitMode && remainingSteps > 0)
+            if (currentPlayer == LocalPlayerNumber && isSplitMode && remainingSteps > 0)
             {
+                if (currentCardHandler != null)
+                {
+                    DeferOopsCardReturn(currentCardHandler);
+                }
+                suppressHumanInput = true;
+
                 // Only update remainder UI/auto-send for the local player when we know the first piece.
                 if (currentPlayer == LocalPlayerNumber && selectedPieceForSplit != null)
                 {
@@ -7765,42 +8441,22 @@ public class GameManager : MonoBehaviour
                     }
                 }
 
-                // Do not return/reset the card yet.
-                return;
+                // Keep card open, but still emit userTurn for this completed move.
             }
+            oopsFinalizeCardOnNextUserTurn = true;
+            oopsPendingCardReturnHandler = currentCardHandler;
+            suppressHumanInput = true;
 
-            if (currentCardHandler != null)
+            oopsFinalizeArmedTurnUserId = oopsCurrentTurnUserId;
+            oopsFinalizeArmedPlayer = currentPlayer;
+
+            oopsUserTurnSendToken++;
+            StartCoroutine(SendOopsUserTurnAfterVisualSettle(movedPiece, oopsUserTurnSendToken));
+
+            if (movedPiece != null && TryConsumeQueuedOopsPawnMove(movedPiece, out int queuedIndex, out int queuedSteps))
             {
-                currentCardHandler.ReturnCardToStart();
+                StartCoroutine(StartQueuedOopsPawnMoveNextFrame(movedPiece, queuedIndex, queuedSteps));
             }
-
-            isSplitMode = false;
-            remainingSteps = 0;
-            selectedPieceForSplit = null;
-            oopsSplitAwaitingSecondPiece = false;
-            oopsSplitMoveSent = false;
-
-            isCard10Mode = false;
-            isCard11Mode = false;
-            selectedPieceForCard11 = null;
-            isCard12Mode = false;
-            selectedPieceForCard12 = null;
-            isSorryMode = false;
-            selectedPieceForSorry = null;
-
-            cardPicked = false;
-            currentCardValue = 0;
-            currentCardPower1 = "";
-            currentCardPower2 = "";
-            currentCardHandler = null;
-
-            StopAllTurnPieceHighlights();
-
-            // Ensure deck + input reflect whose turn it is (server-authoritative).
-            suppressHumanInput = currentPlayer != Mathf.Clamp(localPlayerNumber, 1, 4);
-            UpdateTurnIndicatorUI();
-            UpdateDeckTintForTurn();
-            UpdatePiecesInteractivityForOopsTurn();
 
             return;
         }
@@ -7854,6 +8510,19 @@ public class GameManager : MonoBehaviour
                 if (remainingSteps <= 0)
                 {
                     Debug.Log($"🔵 Split Mode: All steps used in first move. Completing split mode.");
+                    if (IsPlayWithOopsMode)
+                    {
+                        oopsSplitInProgress = false;
+                        if (currentCardHandler != null)
+                        {
+                            DeferOopsCardReturn(currentCardHandler);
+                        }
+
+                        oopsUserTurnSendToken++;
+                        StartCoroutine(SendOopsUserTurnAfterVisualSettle(movedPiece, oopsUserTurnSendToken));
+                        return;
+                    }
+
                     CompleteSplitMode();
                     return;
                 }
@@ -7887,6 +8556,19 @@ public class GameManager : MonoBehaviour
                 if (remainingSteps <= 0)
                 {
                     Debug.Log($"🔵 Split Mode: All steps used. Completing split mode.");
+                    if (IsPlayWithOopsMode)
+                    {
+                        oopsSplitInProgress = false;
+                        if (currentCardHandler != null)
+                        {
+                            DeferOopsCardReturn(currentCardHandler);
+                        }
+
+                        oopsUserTurnSendToken++;
+                        StartCoroutine(SendOopsUserTurnAfterVisualSettle(movedPiece, oopsUserTurnSendToken));
+                        return;
+                    }
+
                     CompleteSplitMode();
                     return;
                 }
@@ -7903,6 +8585,19 @@ public class GameManager : MonoBehaviour
         {
             // Normal card - card return karo
             Debug.Log($"🔵 Normal card mode: Returning card and switching turn.");
+            if (IsPlayWithOopsMode)
+            {
+                // In PlayWithOops, keep the card visible/open until server confirms the next turn via userTurn.
+                if (currentCardHandler != null)
+                {
+                    DeferOopsCardReturn(currentCardHandler);
+                }
+
+                oopsUserTurnSendToken++;
+                StartCoroutine(SendOopsUserTurnAfterVisualSettle(movedPiece, oopsUserTurnSendToken));
+                return;
+            }
+
             if (currentCardHandler != null)
             {
                 currentCardHandler.ReturnCardToStart();
@@ -8499,10 +9194,25 @@ public class GameManager : MonoBehaviour
 
     bool IsBotPlayer(int playerNumber)
     {
-        if (playerNumber == 1) return player1IsBot;
-        if (playerNumber == 2) return player2IsBot;
-        if (playerNumber == 3) return player3IsBot;
-        if (playerNumber == 4) return player4IsBot;
+        bool flagged = false;
+        if (playerNumber == 1) flagged = player1IsBot;
+        else if (playerNumber == 2) flagged = player2IsBot;
+        else if (playerNumber == 3) flagged = player3IsBot;
+        else if (playerNumber == 4) flagged = player4IsBot;
+
+        if (flagged) return true;
+
+        // PlayWithOops bots are identified by server user ids like "bot_...".
+        if (IsPlayWithOopsMode && serverUserIdByMappedPlayerNumber != null
+            && serverUserIdByMappedPlayerNumber.TryGetValue(playerNumber, out string serverId)
+            && !string.IsNullOrEmpty(serverId))
+        {
+            if (serverId.StartsWith("bot", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
         return false;
     }
 

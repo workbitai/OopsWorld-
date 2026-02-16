@@ -995,8 +995,17 @@ public class PlayerPiece : MonoBehaviour
         aPiece.transform.position = aEnd;
         bPiece.transform.position = bEnd;
 
+        int aFromIndex = aPiece.GetCurrentPathIndex();
+        int bFromIndex = bPiece.GetCurrentPathIndex();
+
         aPiece.ForceSetPosition(aTargetPos, aTargetIndex);
         bPiece.ForceSetPosition(bTargetPos, bTargetIndex);
+
+        if (gameManager != null)
+        {
+            gameManager.LogOopsMove(aPiece, aFromIndex, aTargetIndex, "SWAP");
+            gameManager.LogOopsMove(bPiece, bFromIndex, bTargetIndex, "SWAP");
+        }
 
         aPiece.RecalculateCurrentPathIndexFromParent();
         bPiece.RecalculateCurrentPathIndexFromParent();
@@ -1033,6 +1042,11 @@ public class PlayerPiece : MonoBehaviour
         if (completeCard11Mode && gameManager != null)
         {
             gameManager.CompleteCard11Mode();
+        }
+
+        if (gameManager != null && gameManager.IsPlayWithOopsMode)
+        {
+            gameManager.NotifyOopsServerSwapAnimationCompleted(aPiece);
         }
 
         aPiece.isMoving = false;
@@ -3034,9 +3048,9 @@ public class PlayerPiece : MonoBehaviour
 
         Debug.Log($"Player {playerNumber} Piece {pieceNumber} moved to position {targetIndex} ({stepsUsed} steps used) and became child of '{targetPosition.name}'");
 
-        // Notify GameManager that piece moved (steps used pass karo)
         if (gameManager != null)
         {
+            gameManager.LogOopsMove(this, previousIndex, targetIndex, "MOVE");
             gameManager.OnPieceMoved(this, stepsUsed);
         }
     }
