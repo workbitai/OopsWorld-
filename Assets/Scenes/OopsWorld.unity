@@ -23816,7 +23816,7 @@ MonoBehaviour:
   - lobbyId: 
     winningCoin: 75
     winningDiamond: 785
-    entryCoin: 858
+    entryCoin: 10
     isLocked: 0
   - lobbyId: 
     winningCoin: 75
@@ -35572,7 +35572,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: bce2c1b75e51a7245bb7f799d8854411, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  socketUrl: http://192.168.1.20:4000
+  socketUrl: http://192.168.1.10:4000
   autoStartOnStart: 0
   currentState: 0
   hasReceivedGameStart: 0
@@ -67716,7 +67716,7 @@ MonoBehaviour:
   internetOverlayCheckIntervalSeconds: 0.5
   noInternetOverlayMessage: No internet connection. Please check and try again.
   internetOverlayPanel: {fileID: 1931706574}
-  apiBaseUrl: http://192.168.1.20:4000/api
+  apiBaseUrl: http://192.168.1.10:4000/api
   loginApiPath: /Users/Login
   gameWalletSelectPath: /GameLobby/Select
   userUpdateApiPath: /Users/Update

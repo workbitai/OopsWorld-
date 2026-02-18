@@ -275,6 +275,8 @@ public class PlayerPiece : MonoBehaviour
 
     private static bool isCard11SwapAnimating = false;
 
+    private static bool isOopsBumpAnimating = false;
+
     [Header("Card 11 Swap Animation")]
     [Range(0.05f, 1.25f)]
     [SerializeField] private float card11SwapDuration = 0.35f;
@@ -1047,11 +1049,140 @@ public class PlayerPiece : MonoBehaviour
         if (gameManager != null && gameManager.IsPlayWithOopsMode)
         {
             gameManager.NotifyOopsServerSwapAnimationCompleted(aPiece);
+            gameManager.NotifyOopsServerSwapAnimationCompleted(bPiece);
         }
 
         aPiece.isMoving = false;
         bPiece.isMoving = false;
         isCard11SwapAnimating = false;
+    }
+
+    public IEnumerator AnimateOopsBumpAndFinalize(PlayerPiece attacker, Transform attackerTargetPos, int attackerTargetIndex, PlayerPiece victim)
+    {
+        if (attacker == null || victim == null || attackerTargetPos == null || attackerTargetIndex < 0)
+        {
+            yield break;
+        }
+
+        if (isOopsBumpAnimating)
+        {
+            yield break;
+        }
+
+        Transform victimHome = victim.homeTransform;
+        if (victimHome == null)
+        {
+            yield break;
+        }
+
+        isOopsBumpAnimating = true;
+
+        attacker.StopTurnHighlight();
+        victim.StopTurnHighlight();
+        if (gameManager != null)
+        {
+            gameManager.StopAllTurnPieceHighlights();
+        }
+
+        attacker.isMoving = true;
+        victim.isMoving = true;
+
+        Transform aMovementRoot = attacker.GetMovementRoot();
+        if (aMovementRoot != null)
+        {
+            RectTransform aRt = attacker.transform as RectTransform;
+            if (aRt != null)
+            {
+                aRt.SetParent(aMovementRoot, true);
+            }
+            else
+            {
+                attacker.transform.SetParent(aMovementRoot, true);
+            }
+        }
+        else
+        {
+            attacker.transform.SetParent(null, true);
+        }
+
+        Transform vMovementRoot = victim.GetMovementRoot();
+        if (vMovementRoot != null)
+        {
+            RectTransform vRt = victim.transform as RectTransform;
+            if (vRt != null)
+            {
+                vRt.SetParent(vMovementRoot, true);
+            }
+            else
+            {
+                victim.transform.SetParent(vMovementRoot, true);
+            }
+        }
+        else
+        {
+            victim.transform.SetParent(null, true);
+        }
+
+        Vector3 aStart = attacker.transform.position;
+        Vector3 vStart = victim.transform.position;
+        Vector3 aEnd = attacker.GetWorldPositionWithYOffset(attackerTargetPos);
+        Vector3 vEnd = victim.GetWorldPositionWithYOffset(victimHome);
+
+        Vector3 aMid = (aStart + aEnd) * 0.5f;
+        Vector3 vMid = (vStart + vEnd) * 0.5f;
+
+        Vector3 aDir = aEnd - aStart;
+        Vector3 vDir = vEnd - vStart;
+
+        Vector3 aPerp = aDir.sqrMagnitude > 0.0001f ? Vector3.Cross(aDir.normalized, Vector3.forward) : Vector3.up;
+        Vector3 vPerp = vDir.sqrMagnitude > 0.0001f ? Vector3.Cross(vDir.normalized, Vector3.forward) : Vector3.down;
+
+        float curve = card11SwapCurveAmount;
+        Vector3 aControl = aMid + (aPerp * curve);
+        Vector3 vControl = vMid - (vPerp * curve);
+
+        float duration = Mathf.Max(0.01f, card11SwapDuration);
+        float t = 0f;
+        while (t < duration)
+        {
+            t += Time.deltaTime;
+            float u = Mathf.Clamp01(t / duration);
+            float eased = u * u * (3f - 2f * u);
+
+            attacker.transform.position = EvaluateQuadraticBezier(aStart, aControl, aEnd, eased);
+            victim.transform.position = EvaluateQuadraticBezier(vStart, vControl, vEnd, eased);
+            yield return null;
+        }
+
+        attacker.transform.position = aEnd;
+        victim.transform.position = vEnd;
+
+        int attackerFromIndex = attacker.GetCurrentPathIndex();
+        int victimFromIndex = victim.GetCurrentPathIndex();
+
+        attacker.ForceSetPosition(attackerTargetPos, attackerTargetIndex);
+        victim.ReturnToHome();
+
+        if (gameManager != null)
+        {
+            gameManager.LogOopsMove(attacker, attackerFromIndex, attackerTargetIndex, "BUMP");
+            gameManager.LogOopsMove(victim, victimFromIndex, -1, "KILL");
+        }
+
+        attacker.RecalculateCurrentPathIndexFromParent();
+        victim.RecalculateCurrentPathIndexFromParent();
+
+        ClearAllPiecesHighlights();
+        DisableSwapTargetHighlightForOpponent();
+
+        if (gameManager != null && gameManager.IsPlayWithOopsMode)
+        {
+            gameManager.NotifyOopsServerSwapAnimationCompleted(attacker);
+        }
+
+        attacker.isMoving = false;
+        victim.isMoving = false;
+        isOopsBumpAnimating = false;
     }
 
     private static Vector3 EvaluateQuadraticBezier(Vector3 p0, Vector3 p1, Vector3 p2, float t)

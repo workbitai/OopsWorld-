@@ -686,10 +686,19 @@ public class LobbyListManager : MonoBehaviour
             yield break;
         }
 
-        // Online lobby entry fee should be debited via API before joining game.
+        bool shouldDebitOnline = true;
+        if (gameManager == null)
+        {
+            gameManager = FindObjectOfType<GameManager>();
+        }
+        if (gameManager != null && gameManager.IsPlayWithOopsMode)
+        {
+            shouldDebitOnline = false;
+        }
+
         long onlineDebitLong = Math.Max(0L, entry.entryCoin);
         int onlineDebitAmount = onlineDebitLong > int.MaxValue ? int.MaxValue : (int)onlineDebitLong;
-        if (onlineDebitAmount > 0)
+        if (shouldDebitOnline && onlineDebitAmount > 0)
         {
             bool debitDone = false;
             string debitError = null;

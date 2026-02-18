@@ -104,6 +104,62 @@ public class GameManager : MonoBehaviour
         public bool isGuest;
     }
 
+    private void StopOopsPendingAnimatedMoveWatchdog()
+    {
+        oopsPendingAnimatedMoveWatchdogToken++;
+        if (oopsPendingAnimatedMoveWatchdogCoroutine != null)
+        {
+            StopCoroutine(oopsPendingAnimatedMoveWatchdogCoroutine);
+            oopsPendingAnimatedMoveWatchdogCoroutine = null;
+        }
+    }
+
+    private void StartOopsPendingAnimatedMoveWatchdog(int updateSeq, int moverMappedPlayer)
+    {
+        if (!IsPlayWithOopsMode) return;
+
+        bool shouldSend = moverMappedPlayer == LocalPlayerNumber || IsBotPlayer(moverMappedPlayer);
+        if (!shouldSend) return;
+
+        StopOopsPendingAnimatedMoveWatchdog();
+        oopsPendingAnimatedMoveWatchdogToken++;
+        int token = oopsPendingAnimatedMoveWatchdogToken;
+        oopsPendingAnimatedMoveWatchdogCoroutine = StartCoroutine(OopsPendingAnimatedMoveWatchdog(token, updateSeq, moverMappedPlayer));
+    }
+
+    private IEnumerator OopsPendingAnimatedMoveWatchdog(int token, int updateSeq, int moverMappedPlayer)
+    {
+        float timeout = 6f;
+        while (timeout > 0f)
+        {
+            if (token != oopsPendingAnimatedMoveWatchdogToken) yield break;
+            if (!IsPlayWithOopsMode) yield break;
+            if (gameOver || !modeSelected) yield break;
+            if (oopsRoomIsFinished) yield break;
+            if (updateSeq != oopsPendingAnimatedMoveSequence) yield break;
+
+            if (oopsPendingAnimatedMoveCompletions <= 0)
+            {
+                yield break;
+            }
+
+            timeout -= Time.deltaTime;
+            yield return null;
+        }
+
+        if (token != oopsPendingAnimatedMoveWatchdogToken) yield break;
+        if (!IsPlayWithOopsMode) yield break;
+        if (gameOver || !modeSelected) yield break;
+        if (oopsRoomIsFinished) yield break;
+        if (updateSeq != oopsPendingAnimatedMoveSequence) yield break;
+        if (oopsPendingAnimatedMoveCompletions <= 0) yield break;
+
+        Debug.LogError($"PlayWithOops: pending animated move watchdog fired; forcing userTurn send. seq={updateSeq}, moverMappedP={moverMappedPlayer}, remaining={oopsPendingAnimatedMoveCompletions}");
+        oopsPendingAnimatedMoveCompletions = 0;
+        oopsUserTurnSentForRoomUpdateSeq = updateSeq;
+        Debug.LogWarning("PlayWithOops: pending-anim-timeout ignored (userTurn is only sent after an actual local/bot pawn move). Waiting for server userTurn.");
+    }
+
     [Serializable]
     private class HomeAutoLoginResponseMeta
     {
@@ -142,6 +198,10 @@ public class GameManager : MonoBehaviour
 
     private string oopsLastMovingPlayerId;
 
+    private int oopsLastMovingMappedPlayer;
+
+    private Coroutine winPopupCoroutine;
+
     private bool oopsUserTurnInFlight;
 
     private bool oopsUserTurnQueued;
@@ -157,6 +217,100 @@ public class GameManager : MonoBehaviour
     private bool oopsRoomIsFinished;
     private string oopsRoomWinnerUserId;
 
+    private void HandleOopsRoomFinishedIfNeeded(string winnerUserId, Dictionary<string, int> userIdToMappedPlayer, IList players)
+    {
+        if (!IsPlayWithOopsMode) return;
+        if (gameOver) return;
+        if (string.IsNullOrEmpty(winnerUserId)) return;
+
+        int fallbackServerIndex = players != null ? FindPlayerIndexByUserId(players, winnerUserId) : -1;
+        if (fallbackServerIndex < 0) fallbackServerIndex = 0;
+        int winnerMappedPlayer = ResolveMappedPlayerForServerUserId(winnerUserId, userIdToMappedPlayer, fallbackServerIndex);
+        winnerMappedPlayer = Mathf.Clamp(winnerMappedPlayer, 1, 4);
+
+        gameOver = true;
+        winningPlayer = winnerMappedPlayer;
+
+        StopTurnCountdown();
+
+        if (winPopupCoroutine != null)
+        {
+            StopCoroutine(winPopupCoroutine);
+            winPopupCoroutine = null;
+        }
+        StopCardPickReminder();
+        StopOopsPendingAnimatedMoveWatchdog();
+        StopOopsAutoMoveWatchdog();
+
+        if (oopsOpponentNoMoveWatchdog != null)
+        {
+            StopCoroutine(oopsOpponentNoMoveWatchdog);
+            oopsOpponentNoMoveWatchdog = null;
+        }
+
+        if (oopsLocalNoMoveWatchdog != null)
+        {
+            StopCoroutine(oopsLocalNoMoveWatchdog);
+            oopsLocalNoMoveWatchdog = null;
+        }
+
+        oopsUserTurnQueued = false;
+        oopsQueuedUserTurnMovedPiece = null;
+        oopsQueuedUserTurnReason = null;
+        oopsQueuedUserTurnMovedPieces.Clear();
+
+        oopsDeferredUserTurnSend = false;
+        oopsDeferredUserTurnMovedPiece = null;
+
+        suppressHumanInput = true;
+        cardAnimationLock = false;
+        pendingSwitchTurn = false;
+
+        CardClickHandler[] allCards = FindObjectsOfType<CardClickHandler>();
+        for (int i = 0; i < allCards.Length; i++)
+        {
+            if (allCards[i] == null) continue;
+            allCards[i].SetCardClickable(false);
+        }
+
+        if (currentCardHandler != null)
+        {
+            currentCardHandler.ReturnCardToStart();
+        }
+
+        foreach (var p in GetAllActivePieces())
+        {
+            if (p == null) continue;
+            p.SetClickable(false);
+        }
+
+        ScheduleWinPopup(winningPlayer);
+    }
+
+    private void ScheduleWinPopup(int winner)
+    {
+        if (winPopupCoroutine != null)
+        {
+            StopCoroutine(winPopupCoroutine);
+            winPopupCoroutine = null;
+        }
+
+        winPopupCoroutine = StartCoroutine(ShowWinPopupAfterDelay(winner));
+    }
+
+    private IEnumerator ShowWinPopupAfterDelay(int winner)
+    {
+        yield return new WaitForSecondsRealtime(2f);
+
+        PopupHandler popupHandler = FindObjectOfType<PopupHandler>();
+        if (popupHandler != null)
+        {
+            popupHandler.ShowWinPopup(winner);
+        }
+
+        winPopupCoroutine = null;
+    }
+
     public bool ShouldDeferOopsCardReturn(CardClickHandler handler)
     {
         if (!IsPlayWithOopsMode) return false;
@@ -171,13 +325,17 @@ public class GameManager : MonoBehaviour
         if (handler == null) return;
 
         oopsPendingCardReturnHandler = handler;
-        oopsFinalizeCardOnNextUserTurn = true;
     }
 
     public void NotifyOopsServerSwapAnimationCompleted(PlayerPiece movedPiece)
     {
         if (!IsPlayWithOopsMode) return;
         if (gameOver || !modeSelected) return;
+
+        if (oopsLastMovingMappedPlayer > 0 && movedPiece != null && movedPiece.playerNumber != oopsLastMovingMappedPlayer)
+        {
+            return;
+        }
 
         // Keep the card visible until the server confirms the next turn via userTurn.
         if (currentCardHandler != null)
@@ -214,8 +372,8 @@ public class GameManager : MonoBehaviour
     {
         if (!IsPlayWithOopsMode) return;
 
-        int previousPlayer = currentPlayer;
-
+        // In PlayWithOops, the server is authoritative about turn changes.
+        // Do NOT locally return the card or advance the turn; only unlock local UI and wait for userTurn.
         if (oopsLocalNoMoveWatchdog != null)
         {
             StopCoroutine(oopsLocalNoMoveWatchdog);
@@ -228,68 +386,11 @@ public class GameManager : MonoBehaviour
             oopsOpponentNoMoveWatchdog = null;
         }
 
-        // Best-effort: unlock input + card animation lock so UI can continue.
         NotifyMoveCompleted();
         cardAnimationLock = false;
         pendingSwitchTurn = false;
-        suppressHumanInput = false;
 
-        // Return the card if possible.
-        if (currentCardHandler != null)
-        {
-            currentCardHandler.ReturnCardToStart();
-        }
-
-        // Reset card + modes.
-        cardPicked = false;
-        currentCardValue = 0;
-        currentCardPower1 = "";
-        currentCardPower2 = "";
-        currentCardHandler = null;
-
-        isSplitMode = false;
-        remainingSteps = 0;
-        selectedPieceForSplit = null;
-
-        isCard10Mode = false;
-        isCard11Mode = false;
-        selectedPieceForCard11 = null;
-        isCard12Mode = false;
-        selectedPieceForCard12 = null;
-        isSorryMode = false;
-        selectedPieceForSorry = null;
-
-        extraTurnPending = false;
-
-        StopAllTurnPieceHighlights();
-
-        // Locally advance player turn (server ideally should broadcast, but this prevents soft-lock).
-        int count = GetActivePlayerCount();
-        if (count <= 2)
-        {
-            currentPlayer = currentPlayer == 1 ? 2 : 1;
-        }
-        else
-        {
-            currentPlayer++;
-            if (currentPlayer > count)
-            {
-                currentPlayer = 1;
-            }
-        }
-
-        // If the server is still reporting the previous turn index for a short time,
-        // suppress that stale turn assignment so the next player actually gets time to act.
-        oopsSuppressServerTurnPlayer = previousPlayer;
-        oopsSuppressServerTurnKeepPlayer = currentPlayer;
-        oopsSuppressServerTurnUntil = Time.unscaledTime + 0.75f;
-
-        suppressHumanInput = currentPlayer != 1;
-        UpdateTurnIndicatorUI();
-        UpdateDeckTintForTurn();
-        UpdatePiecesInteractivityForOopsTurn();
-        StartCardPickReminderIfNeeded();
-        StartTurnCountdownForCurrentPlayer();
+        Debug.LogWarning($"PlayWithOops: ForceAdvanceOopsTurnLocally suppressed (waiting for server userTurn). reason={reason}, currentPlayer={currentPlayer}, cardPicked={cardPicked}, card={currentCardValue}");
     }
 
     private readonly Dictionary<int, string> serverUserIdByMappedPlayerNumber = new Dictionary<int, string>();
@@ -303,6 +404,16 @@ public class GameManager : MonoBehaviour
     private int oopsSplitFirstSteps;
 
     private readonly Dictionary<string, int> oopsPendingOriginalStepsByPawnKey = new Dictionary<string, int>();
+
+    private struct OopsRecentPawnTarget
+    {
+        public int TargetIndex;
+        public float Time;
+        public int UpdateSeq;
+    }
+
+    private readonly Dictionary<string, OopsRecentPawnTarget> oopsRecentPawnTargetsByKey = new Dictionary<string, OopsRecentPawnTarget>();
+    private const float oopsRecentPawnTargetHoldSeconds = 1.25f;
 
     private struct OopsQueuedPawnMove
     {
@@ -340,6 +451,7 @@ public class GameManager : MonoBehaviour
         selectedPieceForSorry = null;
 
         oopsQueuedPawnMovesByKey.Clear();
+        oopsRecentPawnTargetsByKey.Clear();
     }
 
     private void QueueOopsPawnMove(int mappedPlayerNumber, int pawnId, int targetIndex, int originalSteps)
@@ -354,6 +466,41 @@ public class GameManager : MonoBehaviour
             TargetIndex = targetIndex,
             OriginalSteps = originalSteps
         };
+    }
+
+    private void RecordOopsRecentPawnTarget(int mappedPlayerNumber, int pawnId, int targetIndex, int updateSeq)
+    {
+        if (!IsPlayWithOopsMode) return;
+        if (mappedPlayerNumber <= 0 || pawnId <= 0) return;
+        if (targetIndex < 0) return;
+
+        string key = $"{mappedPlayerNumber}:{pawnId}";
+        oopsRecentPawnTargetsByKey[key] = new OopsRecentPawnTarget
+        {
+            TargetIndex = targetIndex,
+            Time = Time.unscaledTime,
+            UpdateSeq = updateSeq
+        };
+    }
+
+    private bool ShouldIgnoreOopsSnapBack(int mappedPlayerNumber, int pawnId, int desiredPosition, int updateSeq)
+    {
+        if (!IsPlayWithOopsMode) return false;
+        if (mappedPlayerNumber <= 0 || pawnId <= 0) return false;
+        if (desiredPosition < 0) return false;
+
+        string key = $"{mappedPlayerNumber}:{pawnId}";
+        if (!oopsRecentPawnTargetsByKey.TryGetValue(key, out OopsRecentPawnTarget recent)) return false;
+        if (Time.unscaledTime - recent.Time > oopsRecentPawnTargetHoldSeconds) return false;
+        if (recent.TargetIndex < 0) return false;
+
+        // If a late room update tries to snap the pawn away from where it just animated to, ignore briefly.
+        if (desiredPosition != recent.TargetIndex && updateSeq >= recent.UpdateSeq)
+        {
+            return true;
+        }
+
+        return false;
     }
 
     private bool TryConsumeQueuedOopsPawnMove(PlayerPiece piece, out int targetIndex, out int originalSteps)
@@ -391,6 +538,9 @@ public class GameManager : MonoBehaviour
 
     private int oopsPendingAnimatedMoveCompletions;
     private int oopsPendingAnimatedMoveSequence;
+
+    private int oopsPendingAnimatedMoveWatchdogToken;
+    private Coroutine oopsPendingAnimatedMoveWatchdogCoroutine;
 
     private bool oopsCardOpenRequestInFlight;
 
@@ -731,7 +881,12 @@ public class GameManager : MonoBehaviour
         if (!IsPlayWithOopsMode) return;
 
         oopsUserTurnInFlight = false;
+        if (oopsLastRoomUpdateSeqWithSnapMove > 0)
+        {
+            oopsUserTurnSentForRoomUpdateSeq = oopsLastRoomUpdateSeqWithSnapMove;
+        }
         oopsPendingAnimatedMoveCompletions = 0;
+        StopOopsPendingAnimatedMoveWatchdog();
 
         if (oopsRoomIsFinished)
         {
@@ -757,7 +912,7 @@ public class GameManager : MonoBehaviour
         IDictionary<string, object> root = AsStringObjectDict(payload);
         if (root == null)
         {
-            ApplyOopsRoomStateFromServerUpdate(data, false);
+            ApplyOopsRoomStateFromServerUpdate(data, false, true);
             return;
         }
 
@@ -793,11 +948,11 @@ public class GameManager : MonoBehaviour
 
         if (root.ContainsKey("room"))
         {
-            ApplyOopsRoomStateFromServerUpdate(root, false);
+            ApplyOopsRoomStateFromServerUpdate(root, false, true);
         }
         else
         {
-            ApplyOopsRoomStateFromServerUpdate(data, false);
+            ApplyOopsRoomStateFromServerUpdate(data, false, true);
         }
 
         bool didTurnAdvance = currentPlayer != previousPlayer;
@@ -805,18 +960,6 @@ public class GameManager : MonoBehaviour
         if (!string.IsNullOrEmpty(compareFrom) && !string.IsNullOrEmpty(newTurnUserIdFromEvent))
         {
             didTurnAdvance = !string.Equals(compareFrom, newTurnUserIdFromEvent, StringComparison.Ordinal);
-        }
-
-        object cardOpen = root.TryGetValue("cardOpen", out object co) ? co : null;
-        if (cardOpen != null)
-        {
-            OnOopsCardOpenReceived(cardOpen);
-        }
-
-        object playCard = root.TryGetValue("playCard", out object pc) ? pc : null;
-        if (playCard != null)
-        {
-            OnOopsPlayingCardReceived(playCard);
         }
 
         // Single rule (requested): playCard's movingPlayerId != userTurn.turnIndex => return card to start.
@@ -844,6 +987,23 @@ public class GameManager : MonoBehaviour
 
             oopsFinalizeCardOnNextUserTurn = true;
             didTurnAdvance = true;
+        }
+
+        // Apply embedded cardOpen/playCard only when we are NOT finalizing a mismatch return.
+        // Otherwise the card can "return then re-open" within the same userTurn payload.
+        if (!shouldReturnCardNow)
+        {
+            object cardOpen = root.TryGetValue("cardOpen", out object co) ? co : null;
+            if (cardOpen != null)
+            {
+                OnOopsCardOpenReceived(cardOpen);
+            }
+
+            object playCard = root.TryGetValue("playCard", out object pc) ? pc : null;
+            if (playCard != null)
+            {
+                OnOopsPlayingCardReceived(playCard);
+            }
         }
 
         // Return/reset ONLY when the single rule triggers.
@@ -922,14 +1082,11 @@ public class GameManager : MonoBehaviour
                 oopsUserTurnSendToken++;
                 StartCoroutine(SendOopsUserTurnAfterVisualSettle(queuedPiece, oopsUserTurnSendToken));
             }
-            else if (!string.IsNullOrEmpty(queuedReason))
-            {
-                TrySendOopsUserTurnForCurrentPlayer(queuedReason);
-            }
+            // Ignore queued "reason" sends in PlayWithOops; userTurn is emitted only after an actual pawn move.
         }
     }
 
-    private IEnumerator SendOopsUserTurnAfterSnapFallback(int updateSeq)
+    private IEnumerator SendOopsUserTurnAfterSnapFallback(int updateSeq, PlayerPiece movedPiece)
     {
         yield return null;
         if (!IsPlayWithOopsMode) yield break;
@@ -939,7 +1096,14 @@ public class GameManager : MonoBehaviour
         if (oopsUserTurnInFlight) yield break;
 
         oopsUserTurnSentForRoomUpdateSeq = updateSeq;
-        TrySendOopsUserTurnForCurrentPlayer("snap-move");
+        if (movedPiece == null)
+        {
+            Debug.LogWarning("PlayWithOops: snap-move fallback ignored (movedPiece null). Waiting for server userTurn.");
+            yield break;
+        }
+
+        yield return new WaitForEndOfFrame();
+        TrySendOopsUserTurnForCompletedMove(movedPiece);
     }
 
     private void TrySendOopsUserTurnForCompletedMove(PlayerPiece movedPiece)
@@ -1004,6 +1168,12 @@ public class GameManager : MonoBehaviour
     {
         if (!IsPlayWithOopsMode) return;
 
+        // In PlayWithOops, only emit userTurn after an actual pawn move completes.
+        // Sending userTurn based on generic "current player" reasons can double-send (one from move complete
+        // and one from this path), causing server loops where cardOpen/userTurn repeat.
+        Debug.LogWarning($"PlayWithOops: suppressed userTurn send for current player. reason={reason}");
+        return;
+
         if (oopsRoomIsFinished)
         {
             Debug.LogWarning($"PlayWithOops: userTurn send skipped (room finished) reason={reason}");
@@ -1059,7 +1229,7 @@ public class GameManager : MonoBehaviour
         oopsSplitMoveSent = false;
         StopOopsAutoMoveWatchdog();
         Debug.Log($"PlayWithOops: playCard ACK received (type={(ack != null ? ack.GetType().Name : "<null>")})");
-        ApplyOopsRoomStateFromServerUpdate(ack, true);
+        ApplyOopsRoomStateFromServerUpdate(ack, true, false);
     }
 
     private void OnOopsPlayingCardReceived(object data)
@@ -1068,10 +1238,10 @@ public class GameManager : MonoBehaviour
         oopsSplitMoveSent = false;
         StopOopsAutoMoveWatchdog();
         Debug.Log($"PlayWithOops: playingCard update received (type={(data != null ? data.GetType().Name : "<null>")})");
-        ApplyOopsRoomStateFromServerUpdate(data);
+        ApplyOopsRoomStateFromServerUpdate(data, false, false);
     }
 
-    private void ApplyOopsRoomStateFromServerUpdate(object data, bool fromAck = false)
+    private void ApplyOopsRoomStateFromServerUpdate(object data, bool fromAck = false, bool fromUserTurn = false)
     {
         if (!IsPlayWithOopsMode) return;
 
@@ -1177,11 +1347,25 @@ public class GameManager : MonoBehaviour
         if (!string.IsNullOrEmpty(movingPlayerId))
         {
             oopsLastMovingPlayerId = movingPlayerId;
+            int mapped = 0;
+            if (serverUserIdByMappedPlayerNumber != null && serverUserIdByMappedPlayerNumber.Count > 0)
+            {
+                foreach (var kv in serverUserIdByMappedPlayerNumber)
+                {
+                    if (!string.IsNullOrEmpty(kv.Value) && string.Equals(kv.Value, movingPlayerId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        mapped = kv.Key;
+                        break;
+                    }
+                }
+            }
+            oopsLastMovingMappedPlayer = mapped;
             Debug.Log($"PlayWithOops: room update movingPlayerId={oopsLastMovingPlayerId}");
         }
 
         string chosenMoveType = GetString(room, "chosenMoveType", string.Empty);
         bool wantsSwapAnimation = string.Equals(chosenMoveType, "SWAP", StringComparison.OrdinalIgnoreCase);
+        bool wantsBumpAnimation = string.Equals(chosenMoveType, "BUMP", StringComparison.OrdinalIgnoreCase);
         bool wasSplitInProgress = oopsSplitInProgress;
         oopsSplitInProgress = string.Equals(chosenMoveType, "SPLIT", StringComparison.OrdinalIgnoreCase);
 
@@ -1211,10 +1395,17 @@ public class GameManager : MonoBehaviour
         if (string.IsNullOrEmpty(roomId)) roomId = GetString(room, "_id", string.Empty);
         if (!string.IsNullOrEmpty(roomId)) currentRoomId = roomId;
 
-        localPlayerNumber = 1;
-
         Dictionary<string, int> userIdToMappedPlayer = BuildOopsUserIdToMappedPlayer(players);
         Dictionary<int, string> mappedPlayerToUserId = BuildOopsMappedPlayerToUserId(userIdToMappedPlayer);
+
+        int localServerIndex = FindPlayerIndexByUserId(players, UserId);
+        if (localServerIndex < 0) localServerIndex = 0;
+        localPlayerNumber = ResolveMappedPlayerForServerUserId(UserId, userIdToMappedPlayer, localServerIndex);
+
+        if (isFinishedNow && !string.IsNullOrEmpty(winnerUserId))
+        {
+            HandleOopsRoomFinishedIfNeeded(winnerUserId, userIdToMappedPlayer, players);
+        }
 
         serverUserIdByMappedPlayerNumber.Clear();
         for (int p = 1; p <= 4; p++)
@@ -1226,9 +1417,23 @@ public class GameManager : MonoBehaviour
         }
 
         int previousPlayer = currentPlayer;
+        string previousTurnUserId = oopsCurrentTurnUserId;
         string turnUserId = ResolveTurnUserId(room, players, string.Empty);
-        oopsCurrentTurnUserId = turnUserId;
         int desiredPlayer = ResolveMappedPlayerFromTurnUserId(turnUserId, userIdToMappedPlayer, players);
+
+        // In PlayWithOops, the server turn must be applied ONLY when the authoritative `userTurn` event arrives.
+        // Room/playCard updates may carry the next turn, but we must not change local turn/UI until `userTurn`.
+        if (!fromUserTurn)
+        {
+            if (desiredPlayer != previousPlayer)
+            {
+                Debug.Log($"PlayWithOops: room update reported turn change (server={desiredPlayer}, local={previousPlayer}) but ignored until userTurn.");
+            }
+            desiredPlayer = previousPlayer;
+            turnUserId = previousTurnUserId;
+        }
+
+        oopsCurrentTurnUserId = turnUserId;
 
         if (Time.unscaledTime < oopsSuppressServerTurnUntil && desiredPlayer == oopsSuppressServerTurnPlayer)
         {
@@ -1254,24 +1459,15 @@ public class GameManager : MonoBehaviour
 
         if (!moveInputLockActive && previousPlayer != currentPlayer)
         {
-            // In PlayWithOops, do NOT return/reset the open card purely on room/playCard updates.
-            // The card should return only when the server confirms the turn via userTurn.
-            if (IsPlayWithOopsMode)
-            {
-                EnsureOopsUserTurnListener();
-
-                if (currentCardHandler != null)
-                {
-                    DeferOopsCardReturn(currentCardHandler);
-                }
-            }
-            else
+            // In PlayWithOops, do NOT return/reset the open card on room/playCard updates.
+            // Card return/reset is allowed only by the movingPlayerId vs turnIndex mismatch rule in userTurn.
+            if (!IsPlayWithOopsMode)
             {
                 ResetOopsCardAndModesForNextTurn();
             }
         }
 
-        Debug.Log($"<color=#00BCD4>PlayWithOops</color>: roomId={currentRoomId} players={players.Count} turnUserId={turnUserId} mappedCurrentPlayer={currentPlayer}");
+        Debug.Log($"<color=#00BCD4>PlayWithOops</color>: roomId={currentRoomId} players={players.Count} turnUserId={turnUserId} mappedCurrentPlayer={currentPlayer} fromUserTurn={fromUserTurn}");
         LogOopsMapping("RoomUpdate", turnUserId, currentPlayer, mappedPlayerToUserId);
 
         // In PlayWithOops, suppress local input when it's not the local player's turn.
@@ -1286,6 +1482,11 @@ public class GameManager : MonoBehaviour
 
         List<PlayerPiece> swapPieces = wantsSwapAnimation ? new List<PlayerPiece>(2) : null;
         List<int> swapTargetIndices = wantsSwapAnimation ? new List<int>(2) : null;
+
+        PlayerPiece bumpAttacker = null;
+        int bumpTargetIndex = -1;
+        Transform bumpTargetTransform = null;
+        PlayerPiece bumpVictim = null;
 
         for (int i = 0; i < players.Count; i++)
         {
@@ -1339,6 +1540,19 @@ public class GameManager : MonoBehaviour
                         piece.SyncCurrentPathIndexFromTransform();
                         if (!piece.IsBusy && piece.GetCurrentPathIndex() == position)
                         {
+                            // If the server keeps sending the same move state, avoid repeatedly re-applying ForceSetPosition
+                            // (which can look like the pawn is "moving" again without any new socket event).
+                            Transform expected = pathManager != null ? pathManager.GetPathPosition(mappedPlayerNumber, position) : null;
+                            if (expected != null)
+                            {
+                                bool sameParent = piece.transform.parent == expected;
+                                const float settledEpsilon = 0.05f;
+                                if (sameParent || Vector3.Distance(piece.transform.position, expected.position) <= settledEpsilon)
+                                {
+                                    continue;
+                                }
+                            }
+
                             piece.ApplyServerPathIndexState(position);
                             continue;
                         }
@@ -1363,7 +1577,18 @@ public class GameManager : MonoBehaviour
                             Debug.Log($"PlayWithOops: queued animate for busy piece mappedP={mappedPlayerNumber} pawnId={pawnId} -> position={position}");
                             continue;
                         }
+
                         Debug.Log($"PlayWithOops: animate mappedP={mappedPlayerNumber} pawnId={pawnId} -> position={position}");
+
+                        if (wantsBumpAnimation)
+                        {
+                            bumpAttacker = piece;
+                            bumpTargetIndex = position;
+                            bumpTargetTransform = pathManager != null ? pathManager.GetPathPosition(mappedPlayerNumber, position) : null;
+                            RecordOopsRecentPawnTarget(mappedPlayerNumber, pawnId, position, updateSeq);
+                            continue;
+                        }
+
                         int originalSteps = 0;
                         string key = $"{mappedPlayerNumber}:{pawnId}";
                         if (oopsPendingOriginalStepsByPawnKey.TryGetValue(key, out int storedSteps))
@@ -1371,41 +1596,44 @@ public class GameManager : MonoBehaviour
                             originalSteps = storedSteps;
                             oopsPendingOriginalStepsByPawnKey.Remove(key);
                         }
-                        int animateToIndex = position;
-                        if (originalSteps != 0 && originalSteps > 0)
+
+                        // If we don't know the signed step count (opponent/bot moves), infer direction from server move type.
+                        if (originalSteps == 0 && !string.IsNullOrEmpty(chosenMoveType))
                         {
-                            piece.SyncCurrentPathIndexFromTransform();
-                            if (TryGetDestinationForMove(piece, originalSteps, out int preSlideIndex, out Transform preSlideTransform, out string reason))
+                            int startIndex = piece.GetCurrentPathIndex();
+                            int routeLen = GetOopsRoutePathLengthForPlayer(mappedPlayerNumber);
+                            bool startOnRoute = startIndex >= 0 && startIndex < routeLen;
+                            bool endOnRoute = position >= 0 && position < routeLen;
+                            if (routeLen > 0 && startOnRoute && endOnRoute)
                             {
-                                if (preSlideTransform != null)
+                                if (string.Equals(chosenMoveType, "BACKWARD", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    SlideTrigger matched = FindMatchingSlideTrigger(preSlideTransform, mappedPlayerNumber);
-                                    if (matched != null)
-                                    {
-                                        int slideSteps = Mathf.Max(0, matched.slideSteps);
-                                        int routeLen = GetOopsRoutePathLengthForPlayer(mappedPlayerNumber);
-                                        if (slideSteps > 0 && routeLen > 0 && preSlideIndex >= 0 && preSlideIndex < routeLen && position >= 0 && position < routeLen)
-                                        {
-                                            int routeEntryIndex = Mathf.Max(0, routeLen - 2);
-                                            int slideEndIndex = SimulateSlideEndIndex(preSlideIndex, slideSteps, routeEntryIndex);
-                                            if (slideEndIndex == position)
-                                            {
-                                                animateToIndex = preSlideIndex;
-                                            }
-                                        }
-                                    }
+                                    int back = (startIndex - position + routeLen) % routeLen;
+                                    if (back != 0) originalSteps = -back;
+                                }
+                                else if (string.Equals(chosenMoveType, "FORWARD", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    int fwd = (position - startIndex + routeLen) % routeLen;
+                                    if (fwd != 0) originalSteps = fwd;
                                 }
                             }
                         }
 
-                        piece.MovePieceToPathIndex(animateToIndex, originalSteps);
+                        piece.MovePieceToPathIndex(position, originalSteps);
                         movedPiecesThisUpdate.Add(piece);
                         animatedPiecesThisUpdate.Add(piece);
+
+                        RecordOopsRecentPawnTarget(mappedPlayerNumber, pawnId, position, updateSeq);
                     }
                     else
                     {
                         piece.SyncCurrentPathIndexFromTransform();
                         int previousIndex = piece.GetCurrentPathIndex();
+
+                        if (ShouldIgnoreOopsSnapBack(mappedPlayerNumber, pawnId, position, updateSeq))
+                        {
+                            continue;
+                        }
 
                         if (piece.IsBusy && previousIndex != position)
                         {
@@ -1414,29 +1642,12 @@ public class GameManager : MonoBehaviour
                             continue;
                         }
 
-                        bool shouldForceAnimate = canAnimateNonMoveUpdates
-                                                 && previousIndex != position
-                                                 && !string.IsNullOrEmpty(movingPlayerId)
-                                                 && string.Equals(serverUserId, movingPlayerId, StringComparison.OrdinalIgnoreCase)
-                                                 && !piece.IsBusy
-                                                 && !wantsSwapAnimation;
-
-                        if (shouldForceAnimate)
+                        piece.ApplyServerPathIndexState(position);
+                        if (previousIndex != position)
                         {
-                            Debug.LogWarning($"PlayWithOops: FORCE ANIMATE (isMove=false) mappedP={mappedPlayerNumber} pawnId={pawnId} {previousIndex}->{position} movingPlayerId={movingPlayerId}");
-                            piece.MovePieceToPathIndex(position, 0);
                             movedPiecesThisUpdate.Add(piece);
-                            animatedPiecesThisUpdate.Add(piece);
-                        }
-                        else
-                        {
-                            piece.ApplyServerPathIndexState(position);
-                            if (previousIndex != position)
-                            {
-                                movedPiecesThisUpdate.Add(piece);
-                                hadSnappedMoveThisUpdate = true;
-                                Debug.LogWarning($"PlayWithOops: SNAP move applied mappedP={mappedPlayerNumber} pawnId={pawnId} {previousIndex}->{position} isMove=false");
-                            }
+                            hadSnappedMoveThisUpdate = true;
+                            Debug.LogWarning($"PlayWithOops: SNAP move applied mappedP={mappedPlayerNumber} pawnId={pawnId} {previousIndex}->{position} isMove=false");
                         }
                     }
                 }
@@ -1444,6 +1655,32 @@ public class GameManager : MonoBehaviour
                 {
                     deferredBasePieces.Add(piece);
                 }
+            }
+        }
+
+        if (wantsBumpAnimation && bumpAttacker != null && bumpVictim != null && bumpVictim.playerNumber == bumpAttacker.playerNumber)
+        {
+            bumpVictim = null;
+        }
+
+        if (wantsBumpAnimation && bumpAttacker != null && bumpVictim == null && deferredBasePieces.Count > 0)
+        {
+            for (int i = 0; i < deferredBasePieces.Count; i++)
+            {
+                PlayerPiece candidate = deferredBasePieces[i];
+                if (candidate == null) continue;
+                if (candidate.playerNumber == bumpAttacker.playerNumber) continue;
+                bumpVictim = candidate;
+                break;
+            }
+        }
+
+        if (wantsBumpAnimation && bumpAttacker != null && bumpVictim != null && bumpTargetTransform != null)
+        {
+            if (!bumpAttacker.IsBusy && !bumpVictim.IsBusy)
+            {
+                StartCoroutine(bumpAttacker.AnimateOopsBumpAndFinalize(bumpAttacker, bumpTargetTransform, bumpTargetIndex, bumpVictim));
+                movedPiecesThisUpdate.Add(bumpAttacker);
             }
         }
 
@@ -1504,18 +1741,35 @@ public class GameManager : MonoBehaviour
 
         if (deferredBasePieces.Count > 0)
         {
-            if (movedPiecesThisUpdate.Count == 0)
+            bool bumpWillHandleVictimBase = wantsBumpAnimation && bumpAttacker != null && bumpVictim != null;
+            List<PlayerPiece> basePiecesToApply = deferredBasePieces;
+            if (bumpWillHandleVictimBase)
             {
-                ApplyDeferredOopsBaseStatesNow(deferredBasePieces);
-            }
-            else
-            {
-                if (oopsDeferredBaseApplyCoroutine != null)
+                basePiecesToApply = new List<PlayerPiece>(deferredBasePieces.Count);
+                for (int i = 0; i < deferredBasePieces.Count; i++)
                 {
-                    StopCoroutine(oopsDeferredBaseApplyCoroutine);
-                    oopsDeferredBaseApplyCoroutine = null;
+                    PlayerPiece p = deferredBasePieces[i];
+                    if (p == null) continue;
+                    if (p == bumpVictim) continue;
+                    basePiecesToApply.Add(p);
                 }
-                oopsDeferredBaseApplyCoroutine = StartCoroutine(ApplyDeferredOopsBaseStatesAfterMoves(updateSeq, deferredBasePieces, movedPiecesThisUpdate));
+            }
+
+            if (basePiecesToApply.Count > 0)
+            {
+                if (movedPiecesThisUpdate.Count == 0)
+                {
+                    ApplyDeferredOopsBaseStatesNow(basePiecesToApply);
+                }
+                else
+                {
+                    if (oopsDeferredBaseApplyCoroutine != null)
+                    {
+                        StopCoroutine(oopsDeferredBaseApplyCoroutine);
+                        oopsDeferredBaseApplyCoroutine = null;
+                    }
+                    oopsDeferredBaseApplyCoroutine = StartCoroutine(ApplyDeferredOopsBaseStatesAfterMoves(updateSeq, basePiecesToApply, movedPiecesThisUpdate));
+                }
             }
         }
 
@@ -1526,10 +1780,14 @@ public class GameManager : MonoBehaviour
         {
             oopsPendingAnimatedMoveSequence = updateSeq;
             oopsPendingAnimatedMoveCompletions = animatedPiecesThisUpdate.Count;
+
+            int moverMappedPlayerForWatchdog = ResolveMappedPlayerForServerUserId(movingPlayerId, userIdToMappedPlayer, -1);
+            StartOopsPendingAnimatedMoveWatchdog(updateSeq, moverMappedPlayerForWatchdog);
         }
         else
         {
             oopsPendingAnimatedMoveCompletions = 0;
+            StopOopsPendingAnimatedMoveWatchdog();
         }
 
         if (hadSnappedMoveThisUpdate && movedPiecesThisUpdate.Count > 0)
@@ -1541,7 +1799,8 @@ public class GameManager : MonoBehaviour
             if (moverIsLocalOrBot && animatedPiecesThisUpdate.Count == 0)
             {
                 Debug.LogWarning($"PlayWithOops: snap-move detected; scheduling userTurn send (seq={updateSeq}) movingId={movingPlayerId} movingMappedP={movingMappedPlayer} movedPieces={movedPiecesThisUpdate.Count}");
-                StartCoroutine(SendOopsUserTurnAfterSnapFallback(updateSeq));
+                PlayerPiece movedPiece = movedPiecesThisUpdate != null && movedPiecesThisUpdate.Count > 0 ? movedPiecesThisUpdate[0] : null;
+                StartCoroutine(SendOopsUserTurnAfterSnapFallback(updateSeq, movedPiece));
             }
         }
 
@@ -2948,6 +3207,17 @@ public class GameManager : MonoBehaviour
          NotifyMoveCompleted();
          StopOopsAutoMoveWatchdog();
 
+         if (IsPlayWithOopsMode)
+         {
+             // In PlayWithOops, the server is authoritative.
+             // Do NOT locally return the card or advance the turn; just unlock local animation/input locks.
+             StopAllTurnPieceHighlights();
+             cardAnimationLock = false;
+             pendingSwitchTurn = false;
+             Debug.LogWarning($"PlayWithOops: ForceRecoverTurn suppressed (waiting for server userTurn). reason={reason}, currentPlayer={currentPlayer}, cardPicked={cardPicked}, card={currentCardValue}");
+             return;
+         }
+
          // Clear highlights (safe no-op in this project)
          StopAllTurnPieceHighlights();
 
@@ -3960,6 +4230,8 @@ public class GameManager : MonoBehaviour
     private void TryOopsAutoCardOpenIfNeeded(float remainingSeconds, bool isExtraPhase)
     {
         if (!IsPlayWithOopsMode) return;
+
+        // PlayWithOops auto-turn support: client can trigger cardOpen on timers when the player is inactive.
         if (oopsAutoCardOpenSentThisTurn) return;
         if (currentPlayer != LocalPlayerNumber) return;
         if (cardPicked) return;
@@ -4024,6 +4296,8 @@ public class GameManager : MonoBehaviour
     private bool TryOopsAutoRandomMoveIfNeeded(float remainingSeconds, bool isExtraPhase)
     {
         if (!IsPlayWithOopsMode) return false;
+
+        // PlayWithOops auto-turn support: client can trigger playCard on timers when the player is inactive.
         if (oopsAutoMoveSentThisTurn) return false;
         if (currentPlayer != LocalPlayerNumber) return false;
 
@@ -4979,7 +5253,10 @@ public class GameManager : MonoBehaviour
         bool useOopsLocalRemap = IsPlayWithOopsMode;
         if (useOopsLocalRemap)
         {
-            localPlayerNumber = 1;
+            Dictionary<string, int> localMap = BuildOopsUserIdToMappedPlayer(players);
+            int localServerIndex = FindPlayerIndexByUserId(players, UserId);
+            if (localServerIndex < 0) localServerIndex = 0;
+            localPlayerNumber = ResolveMappedPlayerForServerUserId(UserId, localMap, localServerIndex);
         }
         else
         {
@@ -6399,9 +6676,48 @@ public class GameManager : MonoBehaviour
         pendingOopsOpenCard = null;
         hasOopsCardOpenListener = false;
         hasOopsPlayingCardListener = false;
+        hasOopsUserTurnListener = false;
         serverUserIdByMappedPlayerNumber.Clear();
         oopsPendingOriginalStepsByPawnKey.Clear();
         oopsQueuedPawnMovesByKey.Clear();
+        oopsRecentPawnTargetsByKey.Clear();
+
+        oopsRoomUpdateSequence = 0;
+        oopsLastMovingPlayerId = string.Empty;
+        oopsLastMovingMappedPlayer = 0;
+
+        oopsUserTurnInFlight = false;
+        oopsUserTurnQueued = false;
+        oopsQueuedUserTurnMovedPiece = null;
+        oopsQueuedUserTurnReason = null;
+        oopsQueuedUserTurnMovedPieces.Clear();
+
+        oopsUserTurnSendToken = 0;
+        oopsFinalizeCardOnNextUserTurn = false;
+        oopsPendingCardReturnHandler = null;
+
+        oopsSplitInProgress = false;
+        oopsDeferredUserTurnSend = false;
+        oopsDeferredUserTurnMovedPiece = null;
+        oopsCurrentTurnUserId = string.Empty;
+        oopsFinalizeArmedTurnUserId = string.Empty;
+        oopsFinalizeArmedPlayer = 0;
+        oopsOpenCardOwnerUserId = string.Empty;
+
+        oopsLastRoomUpdateSeqWithSnapMove = 0;
+        oopsUserTurnSentForRoomUpdateSeq = 0;
+        oopsRoomIsFinished = false;
+        oopsRoomWinnerUserId = string.Empty;
+
+        if (oopsDeferredBaseApplyCoroutine != null)
+        {
+            StopCoroutine(oopsDeferredBaseApplyCoroutine);
+            oopsDeferredBaseApplyCoroutine = null;
+        }
+
+        StopOopsPendingAnimatedMoveWatchdog();
+        oopsPendingAnimatedMoveCompletions = 0;
+        oopsPendingAnimatedMoveSequence = 0;
 
         oopsSplitAwaitingSecondPiece = false;
         oopsSplitMoveSent = false;
@@ -7118,6 +7434,11 @@ public class GameManager : MonoBehaviour
         // Auto-execute ONLY when exactly one legal action exists across all pieces/options.
         if (cardValue == 10 && isCard10Mode)
         {
+            if (IsPlayWithOopsMode)
+            {
+                UpdatePowerButtonInteractivity();
+                return;
+            }
             TryAutoExecuteForcedCard10Move();
         }
 
@@ -7316,7 +7637,7 @@ public class GameManager : MonoBehaviour
                 if (totalActions > 1) break;
             }
 
-            if (!piece.IsAtHome() && CheckIfMovePossible(piece, -1))
+            if (CheckIfMovePossible(piece, -1))
             {
                 totalActions++;
                 forcedPiece = piece;
@@ -7443,7 +7764,7 @@ public class GameManager : MonoBehaviour
             {
                 if (piece == null) continue;
                 if (CheckIfMovePossible(piece, 10)) return true;
-                if (!piece.IsAtHome() && CheckIfMovePossible(piece, -1)) return true;
+                if (CheckIfMovePossible(piece, -1)) return true;
             }
             return false;
         }
@@ -7492,7 +7813,16 @@ public class GameManager : MonoBehaviour
 
     public void CompleteCard11Mode()
     {
-        Debug.Log($"🔵 Card 11 Mode Complete!");
+        Debug.Log("\ud83d\udc51 Card 11 Mode Complete!");
+
+        if (IsPlayWithOopsMode)
+        {
+            if (currentCardHandler != null)
+            {
+                DeferOopsCardReturn(currentCardHandler);
+            }
+            return;
+        }
 
         if (currentCardHandler != null)
         {
@@ -7549,7 +7879,16 @@ public class GameManager : MonoBehaviour
 
     public void CompleteSorryMode()
     {
-        Debug.Log($"🔵 SORRY! Mode Complete!");
+        Debug.Log("\ud83d\udc51 SORRY! Mode Complete!");
+
+        if (IsPlayWithOopsMode)
+        {
+            if (currentCardHandler != null)
+            {
+                DeferOopsCardReturn(currentCardHandler);
+            }
+            return;
+        }
 
         if (currentCardHandler != null)
         {
@@ -7590,7 +7929,16 @@ public class GameManager : MonoBehaviour
 
     public void CompleteCard12Mode()
     {
-        Debug.Log($"🔵 Card 12 Mode Complete!");
+        Debug.Log("\ud83d\udc51 Card 12 Mode Complete!");
+
+        if (IsPlayWithOopsMode)
+        {
+            if (currentCardHandler != null)
+            {
+                DeferOopsCardReturn(currentCardHandler);
+            }
+            return;
+        }
 
         if (currentCardHandler != null)
         {
@@ -7634,7 +7982,7 @@ public class GameManager : MonoBehaviour
         if (cardValue == 7 && !isSplitMode)
         {
             // Split possible nahi → Direct 7 move check karo
-            Debug.Log($"🔵 Card 7: Split NOT possible, checking direct 7 move");
+            Debug.Log("Card 7: Split NOT possible, checking direct 7 move");
             foreach (PlayerPiece piece in currentPieces)
             {
                 if (piece == null) continue; // Null check
@@ -7646,29 +7994,29 @@ public class GameManager : MonoBehaviour
                     // Highlight logic removed - no yellow color or scale 1.1
                     piece.SetClickable(true);
                     anyPieceCanMove = true;
-                    Debug.Log($"✅ Piece {piece.pieceNumber} can move 7 steps (direct move)");
+                    Debug.Log($"Piece {piece.pieceNumber} can move 7 steps (direct move)");
                 }
                 else
                 {
                     // Highlight logic removed
-                    Debug.Log($"❌ Piece {piece.pieceNumber} cannot move 7 steps (blocked or invalid)");
+                    Debug.Log($"Piece {piece.pieceNumber} cannot move 7 steps (blocked or invalid)");
                 }
             }
         }
         else
         {
             // Normal cards (1-6) ya Card 7 with split mode
-            Debug.Log($"🔍 CheckAndHighlightPossibleMoves: Total pieces in list = {currentPieces.Count}");
+            Debug.Log("CheckAndHighlightPossibleMoves: Total pieces in list = {currentPieces.Count}");
             for (int i = 0; i < currentPieces.Count; i++)
             {
                 PlayerPiece piece = currentPieces[i];
                 if (piece == null)
                 {
-                    Debug.LogWarning($"⚠️ Null piece found at index {i} in currentPieces list!");
+                    Debug.LogWarning($"Null piece found at index {i} in currentPieces list!");
                     continue; // Null check
                 }
                 
-                Debug.Log($"🔍 Checking Piece {piece.pieceNumber} (index {i}) for card value {cardValue}...");
+                Debug.Log($"Checking Piece {piece.pieceNumber} (index {i}) for card value {cardValue}...");
                 bool canMove = CheckIfMovePossible(piece, cardValue);
                 
                 if (canMove)
@@ -7676,12 +8024,12 @@ public class GameManager : MonoBehaviour
                     // Highlight logic removed - no yellow color or scale 1.1
                     piece.SetClickable(true); // Clickable banao
                     anyPieceCanMove = true;
-                    Debug.Log($"✅ Piece {piece.pieceNumber} can move {cardValue} steps");
+                    Debug.Log($"Piece {piece.pieceNumber} can move {cardValue} steps");
                 }
                 else
                 {
                     // Highlight logic removed
-                    Debug.Log($"❌ Piece {piece.pieceNumber} cannot move {cardValue} steps (blocked or invalid)");
+                    Debug.Log($"Piece {piece.pieceNumber} cannot move {cardValue} steps (blocked or invalid)");
                 }
             }
         }
@@ -7689,7 +8037,12 @@ public class GameManager : MonoBehaviour
         // Rule: Jo koi pan move possible nathi to turn SKIP
         if (!anyPieceCanMove)
         {
-           // Debug.LogWarning($"⚠️ No move possible for Player {currentPlayer} with card value {cardValue}. Turn will be skipped.");
+            if (IsPlayWithOopsMode)
+            {
+                return;
+            }
+
+            // Debug.LogWarning($"No move possible for Player {currentPlayer} with card value {cardValue}. Turn will be skipped.");
             StartCoroutine(SkipTurnAfterDelay());
         }
     }
@@ -7702,7 +8055,7 @@ public class GameManager : MonoBehaviour
     {
         if (piece == null || pathManager == null)
         {
-            //Debug.LogWarning($"⚠️ CheckIfMovePossible: Piece or pathManager is null for Piece {piece?.pieceNumber}");
+            //Debug.LogWarning($"CheckIfMovePossible: Piece or pathManager is null for Piece {piece?.pieceNumber}");
             return false;
         }
 
@@ -7716,7 +8069,7 @@ public class GameManager : MonoBehaviour
         // Backward card check (Card 4)
         if (cardValue < 0 && piece.IsAtHome())
         {
-           // Debug.Log($"⚠️ CheckIfMovePossible: Piece {piece.pieceNumber} at home, backward card {cardValue} not allowed");
+           // Debug.Log($"CheckIfMovePossible: Piece {piece.pieceNumber} at home, backward card {cardValue} not allowed");
             return false; // Backward card home ma use nahi thay
         }
 
@@ -7724,7 +8077,7 @@ public class GameManager : MonoBehaviour
         List<Transform> completePath = pathManager.GetCompletePlayerPath(piece.playerNumber);
         if (completePath == null || completePath.Count == 0)
         {
-           // Debug.LogWarning($"⚠️ CheckIfMovePossible: Complete path is null or empty for Piece {piece.pieceNumber}");
+           // Debug.LogWarning($"CheckIfMovePossible: Complete path is null or empty for Piece {piece.pieceNumber}");
             return false;
         }
 
@@ -7740,7 +8093,7 @@ public class GameManager : MonoBehaviour
         {
             // Piece home/start ma che
             destIndex = cardValue - 1; // steps = 5 to index 4
-           // Debug.Log($"🔍 CheckIfMovePossible: Piece {piece.pieceNumber} at home, destination index = {destIndex} (cardValue {cardValue} - 1)");
+           // Debug.Log($"CheckIfMovePossible: Piece {piece.pieceNumber} at home, destination index = {destIndex} (cardValue {cardValue} - 1)");
         }
         else
         {
@@ -7780,7 +8133,7 @@ public class GameManager : MonoBehaviour
                         destIndex = routePathLastIndex + destIndex + 1;
                     }
                 }
-               // Debug.Log($"🔵 CheckIfMovePossible: Piece {piece.pieceNumber} at index {currentIndex}, backward move {cardValue} => destination index {destIndex}");
+               // Debug.Log($"CheckIfMovePossible: Piece {piece.pieceNumber} at index {currentIndex}, backward move {cardValue} => destination index {destIndex}");
             }
             else
             {
@@ -7813,7 +8166,7 @@ public class GameManager : MonoBehaviour
                     destIndex = currentIndex + cardValue;
                 }
 
-               // Debug.Log($"🔍 CheckIfMovePossible: Piece {piece.pieceNumber} at index {currentIndex}, FORWARD move {cardValue} steps = destination index {destIndex} (routeEntryIndex={routeEntryIndex})");
+               // Debug.Log($"CheckIfMovePossible: Piece {piece.pieceNumber} at index {currentIndex}, FORWARD move {cardValue} steps = destination index {destIndex} (routeEntryIndex={routeEntryIndex})");
             }
         }
 
@@ -7821,26 +8174,26 @@ public class GameManager : MonoBehaviour
         if (destIndex < 0)
         {
             // This should rarely happen with new logic, but safety check
-            Debug.LogWarning($"⚠️ CheckIfMovePossible: Piece {piece.pieceNumber} destination index {destIndex} is negative, clamping to 0");
+            Debug.LogWarning($"CheckIfMovePossible: Piece {piece.pieceNumber} destination index {destIndex} is negative, clamping to 0");
             destIndex = 0;
         }
         else if (destIndex >= completePath.Count)
         {
             // HOME exact-count rule: If a forward move would overshoot beyond the last home slot,
             // the move is invalid (no clamping).
-            Debug.LogWarning($"⚠️ CheckIfMovePossible: Piece {piece.pieceNumber} destination index {destIndex} out of bounds (path count: {completePath.Count}). Move invalid (exact-count HOME rule).");
+            Debug.LogWarning($"CheckIfMovePossible: Piece {piece.pieceNumber} destination index {destIndex} out of bounds (path count: {completePath.Count}). Move invalid (exact-count HOME rule).");
             return false;
         }
 
         // Rule: Same player na piece destination par hoy to move BLOCKED
         if (IsSamePlayerPieceAtPosition(destIndex, piece.playerNumber, piece))
         {
-            Debug.LogWarning($"⚠️ CheckIfMovePossible: Piece {piece.pieceNumber} move BLOCKED - same player piece at destination index {destIndex}");
+            Debug.LogWarning($"CheckIfMovePossible: Piece {piece.pieceNumber} move BLOCKED - same player piece at destination index {destIndex}");
             return false; // BLOCKED - same player na piece destination par che
         }
 
-       // Debug.Log($"✅ CheckIfMovePossible: Piece {piece.pieceNumber} can move to destination index {destIndex}");
-        return true; // Move possible ✅
+       // Debug.Log($"CheckIfMovePossible: Piece {piece.pieceNumber} can move to destination index {destIndex}");
+        return true; // Move possible 
     }
 
     public bool TryGetDestinationForMove(PlayerPiece piece, int cardValue, out int destIndex, out Transform destPosition, out string reason)
@@ -7999,11 +8352,11 @@ public class GameManager : MonoBehaviour
 
         if (ok)
         {
-           // Debug.Log($"🧭 MOVE OPTIONS: P{piece.playerNumber}-Piece{piece.pieceNumber} from {fromLabel} idx={fromIndex} with card {cardValue} => destIndex={destIndex}, destName='{dest.name}'");
+           // Debug.Log($"MOVE OPTIONS: P{piece.playerNumber}-Piece{piece.pieceNumber} from {fromLabel} idx={fromIndex} with card {cardValue} => destIndex={destIndex}, destName='{dest.name}'");
         }
         else
         {
-           // Debug.LogWarning($"🧭 MOVE OPTIONS: P{piece.playerNumber}-Piece{piece.pieceNumber} from {fromLabel} idx={fromIndex} with card {cardValue} => NO MOVE ({reason})");
+           // Debug.LogWarning($"MOVE OPTIONS: P{piece.playerNumber}-Piece{piece.pieceNumber} from {fromLabel} idx={fromIndex} with card {cardValue} => NO MOVE ({reason})");
         }
     }
 
@@ -8072,7 +8425,7 @@ public class GameManager : MonoBehaviour
 
             if (normalizedTarget != null && normalizedPieceAnchor != null && normalizedTarget == normalizedPieceAnchor)
             {
-                Debug.Log($"🚫 Blocked: Piece {piece.pieceNumber} already at target position (normalized anchor match)");
+                Debug.Log($"Blocked: Piece {piece.pieceNumber} already at target position (normalized anchor match)");
                 return true;
             }
 
@@ -8083,7 +8436,7 @@ public class GameManager : MonoBehaviour
             {
                 if (pieceRoot == targetPosition || pieceRoot.IsChildOf(targetPosition))
                 {
-                    //Debug.Log($"🚫 Blocked: Piece {piece.pieceNumber} is under target position (IsChildOf match)");
+                    //Debug.Log($"Blocked: Piece {piece.pieceNumber} is under target position (IsChildOf match)");
                     return true;
                 }
             }
@@ -8093,7 +8446,7 @@ public class GameManager : MonoBehaviour
             if (pieceCurrentIndex == positionIndex)
             {
                 // Same position par piece che - BLOCKED!
-               // Debug.Log($"🚫 Blocked: Piece {piece.pieceNumber} already at position {positionIndex} (index match)");
+               // Debug.Log($"Blocked: Piece {piece.pieceNumber} already at position {positionIndex} (index match)");
                 return true;
             }
 
@@ -8102,7 +8455,7 @@ public class GameManager : MonoBehaviour
             if (pieceTransform != null && (pieceTransform == targetPosition || pieceTransform.IsChildOf(targetPosition)))
             {
                 // Same position par piece che - BLOCKED!
-               // Debug.Log($"🚫 Blocked: Piece {piece.pieceNumber} already at target position (transform match)");
+               // Debug.Log($"Blocked: Piece {piece.pieceNumber} already at target position (transform match)");
                 return true;
             }
             
@@ -8111,7 +8464,7 @@ public class GameManager : MonoBehaviour
             if (piece.transform.parent != null && piece.transform.parent == targetPosition)
             {
                 // Same position par piece che - BLOCKED!
-               // Debug.Log($"🚫 Blocked: Piece {piece.pieceNumber} already at target position (parent match)");
+               // Debug.Log($"Blocked: Piece {piece.pieceNumber} already at target position (parent match)");
                 return true;
             }
 
@@ -8119,7 +8472,7 @@ public class GameManager : MonoBehaviour
             const float occupiedEpsilon = 0.05f;
             if (pieceRoot != null && Vector3.Distance(pieceRoot.position, targetPosition.position) <= occupiedEpsilon)
             {
-               // Debug.Log($"🚫 Blocked: Piece {piece.pieceNumber} already at target position (world distance match)");
+               // Debug.Log($"Blocked: Piece {piece.pieceNumber} already at target position (world distance match)");
                 return true;
             }
         }
@@ -8181,14 +8534,14 @@ public class GameManager : MonoBehaviour
 
                     if (piece1OK && piece2OK)
                     {
-                       // Debug.Log($"✅ Split possible: Piece {piece1.pieceNumber} = {steps1} steps, Piece {piece2.pieceNumber} = {steps2} steps");
-                        return true; // Split possible ✅
+                       // Debug.Log($"Split possible: Piece {piece1.pieceNumber} = {steps1} steps, Piece {piece2.pieceNumber} = {steps2} steps");
+                        return true; // Split possible 
                     }
                 }
             }
         }
 
-        //Debug.Log($"❌ Split NOT possible - no valid combination found");
+        //Debug.Log($"Split NOT possible - no valid combination found");
         return false; // Split possible nahi
     }
 
@@ -8213,23 +8566,10 @@ public class GameManager : MonoBehaviour
 
         yield return new WaitForSeconds(IsPlayWithOopsMode ? 2f : 1f); // Thoduk delay (user ne samaj aavi jay)
 
-        //Debug.Log($"⏭️ Skipping turn for Player {currentPlayer} - No move possible");
+        //Debug.Log($"Skipping turn for Player {currentPlayer} - No move possible");
 
         if (IsPlayWithOopsMode)
         {
-            if (currentCardHandler != null)
-            {
-                DeferOopsCardReturn(currentCardHandler);
-            }
-
-            oopsFinalizeCardOnNextUserTurn = true;
-            oopsPendingCardReturnHandler = currentCardHandler;
-            suppressHumanInput = true;
-
-            oopsFinalizeArmedTurnUserId = oopsCurrentTurnUserId;
-            oopsFinalizeArmedPlayer = currentPlayer;
-
-            Debug.LogWarning("PlayWithOops: SkipTurnAfterDelay no-move detected. Not sending userTurn and not advancing locally; waiting for server.");
             yield break;
         }
 
@@ -8356,7 +8696,7 @@ public class GameManager : MonoBehaviour
             else if (cardValue == 10 && isCard10Mode)
             {
                 bool canForward = CheckIfMovePossible(piece, 10);
-                bool canBackward = !piece.IsAtHome() && CheckIfMovePossible(piece, -1);
+                bool canBackward = CheckIfMovePossible(piece, -1);
                 canInteract = canForward || canBackward;
             }
             else if (cardValue == 11 && isCard11Mode)
@@ -8398,7 +8738,7 @@ public class GameManager : MonoBehaviour
     public void OnPieceMoved(PlayerPiece movedPiece, int stepsUsed)
     {
         NotifyMoveCompleted();
-        Debug.Log($"🔵 OnPieceMoved called: isSplitMode={isSplitMode}, remainingSteps={remainingSteps}, selectedPiece={selectedPieceForSplit != null}");
+        Debug.Log($"OnPieceMoved called: isSplitMode={isSplitMode}, remainingSteps={remainingSteps}, selectedPiece={selectedPieceForSplit != null}");
         
         // Piece move thay pachhi sabhi pieces na destination highlights clear karo
         PlayerPiece.ClearAllPiecesHighlights();
@@ -8410,54 +8750,21 @@ public class GameManager : MonoBehaviour
 
         if (IsPlayWithOopsMode)
         {
-            if (movedPiece != null && movedPiece.playerNumber != LocalPlayerNumber && oopsPendingAnimatedMoveCompletions > 0)
+            if (movedPiece == null)
             {
-                oopsPendingAnimatedMoveCompletions = Mathf.Max(0, oopsPendingAnimatedMoveCompletions - 1);
+                return;
             }
 
-            // IMPORTANT: For +7 split, the server can send 2 separate moves.
-            // We must keep the card in-place until BOTH parts complete.
-            // This must also work for opponent moves where selectedPieceForSplit may not be set locally.
-            if (currentPlayer == LocalPlayerNumber && isSplitMode && remainingSteps > 0)
+            // Keep it simple and deterministic:
+            // Only the current turn's moving player's piece should trigger userTurn send.
+            int mover = oopsLastMovingMappedPlayer > 0 ? oopsLastMovingMappedPlayer : currentPlayer;
+            if (movedPiece.playerNumber != mover)
             {
-                if (currentCardHandler != null)
-                {
-                    DeferOopsCardReturn(currentCardHandler);
-                }
-                suppressHumanInput = true;
-
-                // Only update remainder UI/auto-send for the local player when we know the first piece.
-                if (currentPlayer == LocalPlayerNumber && selectedPieceForSplit != null)
-                {
-                    StopAllTurnPieceHighlights();
-                    ApplyInteractivityForSplitRemainder(remainingSteps, selectedPieceForSplit);
-                    UpdateTurnPieceHighlightsForSplitRemainder(remainingSteps, selectedPieceForSplit);
-
-                    // Auto-finish split remainder in PlayWithOops to prevent soft-lock when the player is inactive.
-                    if (oopsAutoSplitFirstSentThisTurn && !oopsAutoSplitSecondSentThisTurn)
-                    {
-                        oopsAutoSplitSecondSentThisTurn = true;
-                        StartCoroutine(OopsAutoSendSplitSecondNextFrame());
-                    }
-                }
-
-                // Keep card open, but still emit userTurn for this completed move.
+                return;
             }
-            oopsFinalizeCardOnNextUserTurn = true;
-            oopsPendingCardReturnHandler = currentCardHandler;
-            suppressHumanInput = true;
-
-            oopsFinalizeArmedTurnUserId = oopsCurrentTurnUserId;
-            oopsFinalizeArmedPlayer = currentPlayer;
 
             oopsUserTurnSendToken++;
             StartCoroutine(SendOopsUserTurnAfterVisualSettle(movedPiece, oopsUserTurnSendToken));
-
-            if (movedPiece != null && TryConsumeQueuedOopsPawnMove(movedPiece, out int queuedIndex, out int queuedSteps))
-            {
-                StartCoroutine(StartQueuedOopsPawnMoveNextFrame(movedPiece, queuedIndex, queuedSteps));
-            }
-
             return;
         }
 
@@ -8475,21 +8782,21 @@ public class GameManager : MonoBehaviour
         // Card 10 mode check karo
         if (isCard10Mode)
         {
-            Debug.Log($"🔵 Card 10 Mode: Piece moved. Completing card 10 mode.");
+            Debug.Log($"Card 10 Mode: Piece moved. Completing card 10 mode.");
             CompleteCard10Mode();
             return;
         }
 
         if (isCard11Mode)
         {
-            Debug.Log($"🔵 Card 11 Mode: Piece moved. Completing card 11 mode.");
+            Debug.Log($"Card 11 Mode: Piece moved. Completing card 11 mode.");
             CompleteCard11Mode();
             return;
         }
 
         if (isCard12Mode)
         {
-            Debug.Log($"🔵 Card 12 Mode: Piece moved. Completing card 12 mode.");
+            Debug.Log($"Card 12 Mode: Piece moved. Completing card 12 mode.");
             CompleteCard12Mode();
             return;
         }
@@ -8497,19 +8804,19 @@ public class GameManager : MonoBehaviour
         // Split mode check karo (Card 7)
         if (isSplitMode)
         {
-            Debug.Log($"🔵 Split Mode Active: remainingSteps={remainingSteps}, stepsUsed={stepsUsed}");
+            Debug.Log($"Split Mode Active: remainingSteps={remainingSteps}, stepsUsed={stepsUsed}");
             
             // First piece move thayu
             if (selectedPieceForSplit == null)
             {
                 selectedPieceForSplit = movedPiece;
                 remainingSteps -= stepsUsed;
-                Debug.Log($"🔵 Split Mode: First piece moved {stepsUsed} steps. Remaining: {remainingSteps} steps");
+                Debug.Log($"Split Mode: First piece moved {stepsUsed} steps. Remaining: {remainingSteps} steps");
                 
                 // Agar remaining steps 0 ya negative thai gay to split complete
                 if (remainingSteps <= 0)
                 {
-                    Debug.Log($"🔵 Split Mode: All steps used in first move. Completing split mode.");
+                    Debug.Log($"Split Mode: All steps used in first move. Completing split mode.");
                     if (IsPlayWithOopsMode)
                     {
                         oopsSplitInProgress = false;
@@ -8534,7 +8841,7 @@ public class GameManager : MonoBehaviour
                  if (!anyOtherPieceCanUseRemainder)
                  {
                      int autoSteps = remainingSteps;
-                     Debug.LogWarning($"⚠️ Split Mode: No other piece can use remaining {autoSteps} steps. Auto-finishing on first piece (direct 7 behavior).");
+                     Debug.LogWarning($"Split Mode: No other piece can use remaining {autoSteps} steps. Auto-finishing on first piece (direct 7 behavior).");
                      movedPiece.MovePieceDirectly(autoSteps);
                      return;
                  }
@@ -8543,19 +8850,19 @@ public class GameManager : MonoBehaviour
                  UpdateTurnPieceHighlightsForSplitRemainder(remainingSteps, selectedPieceForSplit);
                 
                 // Card return nahi karo, turn change nahi karo - user ne next piece click karva do
-                Debug.Log($"🔵 Split Mode: Card will NOT return yet. Click another piece to use remaining {remainingSteps} steps.");
+                Debug.Log($"Split Mode: Card will NOT return yet. Click another piece to use remaining {remainingSteps} steps.");
                 return; // IMPORTANT: Return early - card return nahi karo, turn change nahi karo
             }
             else
             {
                 // Second piece (or third piece) move thayu - remaining steps use thayu
                 remainingSteps -= stepsUsed;
-                Debug.Log($"🔵 Split Mode: Additional piece moved {stepsUsed} steps. Remaining: {remainingSteps} steps");
+                Debug.Log($"Split Mode: Additional piece moved {stepsUsed} steps. Remaining: {remainingSteps} steps");
                 
                 // Agar remaining steps 0 ya negative thai gay to split complete
                 if (remainingSteps <= 0)
                 {
-                    Debug.Log($"🔵 Split Mode: All steps used. Completing split mode.");
+                    Debug.Log($"Split Mode: All steps used. Completing split mode.");
                     if (IsPlayWithOopsMode)
                     {
                         oopsSplitInProgress = false;
@@ -8574,7 +8881,7 @@ public class GameManager : MonoBehaviour
                 }
                 
                 // Ahiya pn remaining steps che - user ne next piece click karva do
-                Debug.Log($"🔵 Split Mode: Still {remainingSteps} steps remaining. Click another piece to use them.");
+                Debug.Log($"Split Mode: Still {remainingSteps} steps remaining. Click another piece to use them.");
 
                 ApplyInteractivityForSplitRemainder(remainingSteps, selectedPieceForSplit);
                 UpdateTurnPieceHighlightsForSplitRemainder(remainingSteps, selectedPieceForSplit);
@@ -8584,7 +8891,7 @@ public class GameManager : MonoBehaviour
         else
         {
             // Normal card - card return karo
-            Debug.Log($"🔵 Normal card mode: Returning card and switching turn.");
+            Debug.Log($"Normal card mode: Returning card and switching turn.");
             if (IsPlayWithOopsMode)
             {
                 // In PlayWithOops, keep the card visible/open until server confirms the next turn via userTurn.
@@ -8777,7 +9084,7 @@ public class GameManager : MonoBehaviour
         gameOver = true;
         winningPlayer = playerNumber;
 
-        Debug.Log($"🏁 WINNER: Player {winningPlayer} (all pieces collected in final HOME slot)");
+        Debug.Log($"WINNER: Player {winningPlayer} (all pieces collected in final HOME slot)");
 
         PlayerPiece.ClearAllPiecesHighlights();
 
@@ -8816,11 +9123,7 @@ public class GameManager : MonoBehaviour
             p.HidePiece();
         }
 
-        PopupHandler popupHandler = FindObjectOfType<PopupHandler>();
-        if (popupHandler != null)
-        {
-            popupHandler.ShowWinPopup(winningPlayer);
-        }
+        ScheduleWinPopup(winningPlayer);
 
         DestroyAllBoardPieces();
     }
@@ -8830,8 +9133,17 @@ public class GameManager : MonoBehaviour
     /// </summary>
     void CompleteCard10Mode()
     {
-        Debug.Log($"🔵 Card 10 Mode Complete!");
+        Debug.Log("Card 10 Mode Complete!");
         
+        if (IsPlayWithOopsMode)
+        {
+            if (currentCardHandler != null)
+            {
+                DeferOopsCardReturn(currentCardHandler);
+            }
+            return;
+        }
+
         // Card return karo
         if (currentCardHandler != null)
         {
@@ -8873,7 +9185,16 @@ public class GameManager : MonoBehaviour
     /// </summary>
     void CompleteSplitMode()
     {
-        Debug.Log($"🔵 Split Mode Complete! All steps used.");
+        Debug.Log("Split Mode Complete! All steps used.");
+        
+        if (IsPlayWithOopsMode)
+        {
+            if (currentCardHandler != null)
+            {
+                DeferOopsCardReturn(currentCardHandler);
+            }
+            return;
+        }
         
         // Card return karo
         if (currentCardHandler != null)
@@ -9347,6 +9668,16 @@ public class GameManager : MonoBehaviour
     IEnumerator PowerButtonDiscardAndOpenNext()
     {
         SetCardAnimationLock(true);
+
+        if (IsPlayWithOopsMode)
+        {
+            if (currentCardHandler != null)
+            {
+                DeferOopsCardReturn(currentCardHandler);
+            }
+            SetCardAnimationLock(false);
+            yield break;
+        }
 
         CardClickHandler handlerToReturn = currentCardHandler;
 
