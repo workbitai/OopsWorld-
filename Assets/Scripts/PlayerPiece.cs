@@ -187,6 +187,26 @@ public class PlayerPiece : MonoBehaviour
         StartCoroutine(MoveToDestination(t, pathIndex, originalSteps));
     }
 
+    public void MovePieceToPathIndexWithServerSlide(int baseIndex, int finalIndex, int originalSteps)
+    {
+        if (pathManager == null)
+        {
+            return;
+        }
+
+        if (gameManager == null)
+        {
+            gameManager = FindObjectOfType<GameManager>();
+        }
+
+        if (isMoving)
+        {
+            return;
+        }
+
+        StartCoroutine(MoveToBaseThenServerSlide(baseIndex, finalIndex, originalSteps));
+    }
+
     private void SetPieceVisualActive(bool active)
     {
         if (pieceImage != null)
@@ -2656,7 +2676,7 @@ public class PlayerPiece : MonoBehaviour
     /// <param name="targetPosition">Target position transform</param>
     /// <param name="targetIndex">Target index in path</param>
     /// <param name="originalSteps">Original steps value (positive = forward, negative = backward). Default 0 = unknown.</param>
-    private IEnumerator MoveToDestination(Transform targetPosition, int targetIndex, int originalSteps = 0)
+    private IEnumerator MoveToDestination(Transform targetPosition, int targetIndex, int originalSteps = 0, bool suppressOnPieceMovedCallback = false)
     {
         if (isMoving)
         {
@@ -3269,13 +3289,13 @@ public class PlayerPiece : MonoBehaviour
             }
         }
 
-        if (gameManager != null)
+        if (gameManager != null && !gameManager.IsPlayWithOopsMode)
         {
             yield return StartCoroutine(SafeRunEnumerator(
                 PerformSlideIfNeeded(targetPosition, routePathLength, routeEntryIndex, routePathLastIndex),
                 ex =>
                 {
-                    Debug.LogError($"🧯 MoveToDestination: exception during PerformSlideIfNeeded for P{playerNumber}-#{pieceNumber}: {ex}");
+                    Debug.LogError($" MoveToDestination: exception during PerformSlideIfNeeded for P{playerNumber}-#{pieceNumber}: {ex}");
                     isMoving = false;
                     gameManager.ForceRecoverTurn("exception in PerformSlideIfNeeded");
                 }));
@@ -3339,7 +3359,245 @@ public class PlayerPiece : MonoBehaviour
         if (gameManager != null)
         {
             gameManager.LogOopsMove(this, previousIndex, targetIndex, "MOVE");
-            gameManager.OnPieceMoved(this, stepsUsed);
+            if (!suppressOnPieceMovedCallback)
+            {
+                gameManager.OnPieceMoved(this, stepsUsed);
+            }
+        }
+    }
+
+    private IEnumerator MoveToBaseThenServerSlide(int baseIndex, int finalIndex, int originalSteps)
+    {
+        if (pathManager == null)
+        {
+            yield break;
+        }
+
+        if (gameManager == null)
+        {
+            gameManager = FindObjectOfType<GameManager>();
+        }
+
+        if (gameManager != null)
+        {
+            gameManager.NotifyMoveStarted(this, originalSteps);
+        }
+
+        List<Transform> completePath = pathManager.GetCompletePlayerPath(playerNumber);
+        if (completePath == null || completePath.Count == 0)
+        {
+            if (gameManager != null)
+            {
+                gameManager.NotifyMoveCompleted();
+            }
+            yield break;
+        }
+
+        List<Transform> routePath = pathManager.GetPlayerRoutePath(playerNumber);
+        int routePathLength = routePath != null ? routePath.Count : completePath.Count;
+        if (routePathLength <= 0)
+        {
+            if (gameManager != null)
+            {
+                gameManager.NotifyMoveCompleted();
+            }
+            yield break;
+        }
+
+        int routeEntryIndex = Mathf.Max(0, routePathLength - 2);
+        int routePathLastIndex = routePathLength - 1;
+
+        SyncCurrentPathIndexFromTransform();
+
+        if (baseIndex < 0 || baseIndex >= completePath.Count || finalIndex < 0 || finalIndex >= completePath.Count)
+        {
+            if (gameManager != null)
+            {
+                gameManager.NotifyMoveCompleted();
+            }
+            yield break;
+        }
+
+        Transform baseTarget = pathManager.GetPathPosition(playerNumber, baseIndex);
+        if (baseTarget == null)
+        {
+            if (gameManager != null)
+            {
+                gameManager.NotifyMoveCompleted();
+            }
+            yield break;
+        }
+
+        yield return StartCoroutine(MoveToDestination(baseTarget, baseIndex, originalSteps, true));
+
+        SlideTrigger matchedTrigger = null;
+        try
+        {
+            SlideTrigger[] triggers = baseTarget.GetComponentsInParent<SlideTrigger>(true);
+            if (triggers != null)
+            {
+                for (int i = 0; i < triggers.Length; i++)
+                {
+                    SlideTrigger t = triggers[i];
+                    if (t != null && t.ownerPlayer == playerNumber)
+                    {
+                        matchedTrigger = t;
+                        break;
+                    }
+                }
+            }
+        }
+        catch { }
+
+        GameObject slideVisual = matchedTrigger != null ? matchedTrigger.slideVisualObject : null;
+        bool useVisualSwap = slideVisual != null;
+        float slideVisualZForPath = 0f;
+        Tween slideTween = null;
+
+        if (finalIndex == baseIndex)
+        {
+            if (gameManager != null)
+            {
+                gameManager.OnPieceMoved(this, originalSteps);
+            }
+            yield break;
+        }
+
+        if (baseIndex >= routePathLength || finalIndex >= routePathLength)
+        {
+            MovePieceToPathIndex(finalIndex, originalSteps);
+            yield break;
+        }
+
+        if (isMoving)
+        {
+            yield break;
+        }
+
+        isMoving = true;
+
+        const float slideStepDuration = 0.15f;
+
+        if (useVisualSwap)
+        {
+            SetPieceVisualActive(false);
+            slideVisualZForPath = slideVisual.transform.position.z;
+            slideVisual.SetActive(true);
+            slideVisual.transform.position = new Vector3(transform.position.x, transform.position.y, slideVisualZForPath);
+            slideVisual.transform.rotation = transform.rotation;
+
+            List<Vector3> slidePoints = new List<Vector3>();
+            Vector3 startP = slideVisual.transform.position;
+            startP.z = slideVisualZForPath;
+            slidePoints.Add(startP);
+
+            int sim = baseIndex;
+            while (sim != finalIndex)
+            {
+                int nextSim = (sim == routeEntryIndex) ? 0 : sim + 1;
+                if (nextSim == routePathLastIndex)
+                {
+                    nextSim = (routePathLastIndex == routeEntryIndex) ? 0 : routeEntryIndex;
+                }
+
+                if (nextSim < 0 || nextSim >= completePath.Count)
+                {
+                    break;
+                }
+
+                Transform nextPosT = completePath[nextSim];
+                if (nextPosT == null)
+                {
+                    break;
+                }
+
+                Vector3 wp = GetWorldPositionWithYOffset(nextPosT);
+                wp.z = slideVisualZForPath;
+                slidePoints.Add(wp);
+
+                sim = nextSim;
+            }
+
+            if (slidePoints.Count >= 2)
+            {
+                slideVisual.transform.DOKill();
+                slideTween = slideVisual.transform.DOPath(
+                        slidePoints.ToArray(),
+                        slideStepDuration * (slidePoints.Count - 1),
+                        PathType.CatmullRom,
+                        PathMode.TopDown2D)
+                    .SetEase(Ease.InOutSine);
+            }
+        }
+
+        int current = baseIndex;
+        while (current != finalIndex)
+        {
+            int next = (current == routeEntryIndex) ? 0 : current + 1;
+            if (next == routePathLastIndex)
+            {
+                next = (routePathLastIndex == routeEntryIndex) ? 0 : routeEntryIndex;
+            }
+
+            if (next < 0 || next >= completePath.Count)
+            {
+                break;
+            }
+
+            Transform nextPosition = completePath[next];
+            if (nextPosition == null)
+            {
+                break;
+            }
+
+            if (!useVisualSwap)
+            {
+                yield return StartCoroutine(MoveOneStepLinear(transform.position, GetWorldPositionWithYOffset(nextPosition), slideStepDuration));
+            }
+            else
+            {
+                yield return new WaitForSeconds(slideStepDuration);
+            }
+
+            SetPieceParent(nextPosition);
+            transform.SetAsLastSibling();
+
+            Vector3 localPos = Vector3.zero;
+            localPos.z = -1.0f;
+            ApplyPieceLocalPosition(localPos);
+
+            currentPathIndex = next;
+            currentPositionTransform = nextPosition;
+
+            if (gameManager != null)
+            {
+                gameManager.HandleBumpAnyPieceAtPosition(this, nextPosition, true);
+            }
+
+            current = next;
+
+            if (current != finalIndex && delayBetweenSteps > 0f)
+            {
+                yield return new WaitForSeconds(delayBetweenSteps);
+            }
+        }
+
+        if (slideTween != null && slideTween.active)
+        {
+            yield return slideTween.WaitForCompletion();
+        }
+
+        if (useVisualSwap)
+        {
+            slideVisual.SetActive(false);
+            SetPieceVisualActive(true);
+        }
+
+        isMoving = false;
+
+        if (gameManager != null)
+        {
+            gameManager.OnPieceMoved(this, originalSteps);
         }
     }
 

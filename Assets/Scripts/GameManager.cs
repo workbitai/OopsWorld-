@@ -420,6 +420,8 @@ public class GameManager : MonoBehaviour
     {
         public int TargetIndex;
         public int OriginalSteps;
+        public bool IsSlider;
+        public int BaseIndex;
     }
 
     private readonly Dictionary<string, OopsQueuedPawnMove> oopsQueuedPawnMovesByKey = new Dictionary<string, OopsQueuedPawnMove>();
@@ -455,7 +457,7 @@ public class GameManager : MonoBehaviour
         oopsRecentPawnTargetsByKey.Clear();
     }
 
-    private void QueueOopsPawnMove(int mappedPlayerNumber, int pawnId, int targetIndex, int originalSteps)
+    private void QueueOopsPawnMove(int mappedPlayerNumber, int pawnId, int targetIndex, int originalSteps, bool isSlider = false, int baseIndex = -1)
     {
         if (!IsPlayWithOopsMode) return;
         if (mappedPlayerNumber <= 0 || pawnId <= 0) return;
@@ -465,7 +467,9 @@ public class GameManager : MonoBehaviour
         oopsQueuedPawnMovesByKey[key] = new OopsQueuedPawnMove
         {
             TargetIndex = targetIndex,
-            OriginalSteps = originalSteps
+            OriginalSteps = originalSteps,
+            IsSlider = isSlider,
+            BaseIndex = baseIndex
         };
     }
 
@@ -504,10 +508,12 @@ public class GameManager : MonoBehaviour
         return false;
     }
 
-    private bool TryConsumeQueuedOopsPawnMove(PlayerPiece piece, out int targetIndex, out int originalSteps)
+    private bool TryConsumeQueuedOopsPawnMove(PlayerPiece piece, out int targetIndex, out int originalSteps, out bool isSlider, out int baseIndex)
     {
         targetIndex = -1;
         originalSteps = 0;
+        isSlider = false;
+        baseIndex = -1;
 
         if (!IsPlayWithOopsMode) return false;
         if (piece == null) return false;
@@ -518,10 +524,12 @@ public class GameManager : MonoBehaviour
         oopsQueuedPawnMovesByKey.Remove(key);
         targetIndex = queued.TargetIndex;
         originalSteps = queued.OriginalSteps;
+        isSlider = queued.IsSlider;
+        baseIndex = queued.BaseIndex;
         return true;
     }
 
-    private IEnumerator StartQueuedOopsPawnMoveNextFrame(PlayerPiece piece, int targetIndex, int originalSteps)
+    private IEnumerator StartQueuedOopsPawnMoveNextFrame(PlayerPiece piece, int targetIndex, int originalSteps, bool isSlider, int baseIndex)
     {
         yield return null;
         if (!IsPlayWithOopsMode) yield break;
@@ -531,7 +539,14 @@ public class GameManager : MonoBehaviour
         piece.SyncCurrentPathIndexFromTransform();
         if (piece.GetCurrentPathIndex() == targetIndex) yield break;
 
-        piece.MovePieceToPathIndex(targetIndex, originalSteps);
+        if (isSlider && baseIndex >= 0)
+        {
+            piece.MovePieceToPathIndexWithServerSlide(baseIndex, targetIndex, originalSteps);
+        }
+        else
+        {
+            piece.MovePieceToPathIndex(targetIndex, originalSteps);
+        }
     }
 
     private int oopsRoomUpdateSequence;
@@ -1516,6 +1531,8 @@ public class GameManager : MonoBehaviour
 
                 int pawnId = GetInt(pawn, "pawnId", 0);
                 int position = GetInt(pawn, "position", -1);
+                bool isSlider = GetBool(pawn, "isSlider", false);
+                int basePosition = GetInt(pawn, "baseposition", -1);
                 string status = GetString(pawn, "status", string.Empty);
                 bool isMove = GetBool(pawn, "isMove", false);
 
@@ -1581,7 +1598,7 @@ public class GameManager : MonoBehaviour
                                 stored = stepsValue;
                                 oopsPendingOriginalStepsByPawnKey.Remove(busyKey);
                             }
-                            QueueOopsPawnMove(mappedPlayerNumber, pawnId, position, stored);
+                            QueueOopsPawnMove(mappedPlayerNumber, pawnId, position, stored, isSlider, basePosition);
                             Debug.Log($"PlayWithOops: queued animate for busy piece mappedP={mappedPlayerNumber} pawnId={pawnId} -> position={position}");
                             continue;
                         }
@@ -1627,7 +1644,14 @@ public class GameManager : MonoBehaviour
                             }
                         }
 
-                        piece.MovePieceToPathIndex(position, originalSteps);
+                        if (isSlider && basePosition >= 0)
+                        {
+                            piece.MovePieceToPathIndexWithServerSlide(basePosition, position, originalSteps);
+                        }
+                        else
+                        {
+                            piece.MovePieceToPathIndex(position, originalSteps);
+                        }
                         movedPiecesThisUpdate.Add(piece);
                         animatedPiecesThisUpdate.Add(piece);
 
@@ -1645,7 +1669,7 @@ public class GameManager : MonoBehaviour
 
                         if (piece.IsBusy && previousIndex != position)
                         {
-                            QueueOopsPawnMove(mappedPlayerNumber, pawnId, position, 0);
+                            QueueOopsPawnMove(mappedPlayerNumber, pawnId, position, 0, isSlider, basePosition);
                             Debug.Log($"PlayWithOops: queued snap for busy piece mappedP={mappedPlayerNumber} pawnId={pawnId} {previousIndex}->{position} isMove=false");
                             continue;
                         }
@@ -5828,7 +5852,7 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    public void HandleBumpAnyPieceAtPosition(PlayerPiece movedPiece, Transform landedPosition)
+    public void HandleBumpAnyPieceAtPosition(PlayerPiece movedPiece, Transform landedPosition, bool animateKillInOops = false)
     {
         if (movedPiece == null || landedPosition == null)
         {
@@ -5868,7 +5892,8 @@ public class GameManager : MonoBehaviour
                 Debug.Log($"💥 SLIDE BUMP! Piece {movedPiece.pieceNumber} landed on piece {other.pieceNumber}. Sending it back to START.");
                 other.SyncCurrentPathIndexFromTransform();
                 int fromIndex = other.GetCurrentPathIndex();
-                if (!IsPlayWithOopsMode && !other.IsBusy)
+                bool wantsAnim = (!IsPlayWithOopsMode || animateKillInOops);
+                if (wantsAnim && !other.IsBusy)
                 {
                     StartCoroutine(other.AnimateOopsKillReturnHomeAndFinalize(other));
                 }
@@ -8837,6 +8862,12 @@ public class GameManager : MonoBehaviour
         {
             if (movedPiece == null)
             {
+                return;
+            }
+
+            if (TryConsumeQueuedOopsPawnMove(movedPiece, out int queuedTargetIndex, out int queuedOriginalSteps, out bool queuedIsSlider, out int queuedBaseIndex))
+            {
+                StartCoroutine(StartQueuedOopsPawnMoveNextFrame(movedPiece, queuedTargetIndex, queuedOriginalSteps, queuedIsSlider, queuedBaseIndex));
                 return;
             }
 
