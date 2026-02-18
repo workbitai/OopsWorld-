@@ -358,6 +358,7 @@ public class GameManager : MonoBehaviour
 
     private bool oopsAutoCardOpenSentThisTurn;
     private bool oopsAutoMoveSentThisTurn;
+    private bool oopsLocalFirstTurnPending = true;
     private bool oopsAutoSplitFirstSentThisTurn;
     private bool oopsAutoSplitSecondSentThisTurn;
 
@@ -1474,6 +1475,7 @@ public class GameManager : MonoBehaviour
         suppressHumanInput = currentPlayer != 1;
 
         List<PlayerPiece> deferredBasePieces = new List<PlayerPiece>();
+        List<PlayerPiece> deferredKillVictims = new List<PlayerPiece>();
         List<PlayerPiece> movedPiecesThisUpdate = new List<PlayerPiece>();
         List<PlayerPiece> animatedPiecesThisUpdate = new List<PlayerPiece>();
         bool hadSnappedMoveThisUpdate = false;
@@ -1528,10 +1530,16 @@ public class GameManager : MonoBehaviour
 
                 piece.playerNumber = mappedPlayerNumber;
 
+                int previousIndexForBaseCheck = piece.GetCurrentPathIndex();
+                bool wasOnBoard = previousIndexForBaseCheck >= 0;
                 bool wantsBase = (position == -1 && string.Equals(status, "BASE", StringComparison.OrdinalIgnoreCase)) || position < 0;
                 if (wantsBase)
                 {
                     deferredBasePieces.Add(piece);
+                    if (wasOnBoard)
+                    {
+                        deferredKillVictims.Add(piece);
+                    }
                 }
                 else if (position >= 0)
                 {
@@ -1755,11 +1763,24 @@ public class GameManager : MonoBehaviour
                 }
             }
 
+            List<PlayerPiece> killVictimsToAnimate = deferredKillVictims;
+            if (bumpWillHandleVictimBase && killVictimsToAnimate != null && killVictimsToAnimate.Count > 0)
+            {
+                killVictimsToAnimate = new List<PlayerPiece>(deferredKillVictims.Count);
+                for (int i = 0; i < deferredKillVictims.Count; i++)
+                {
+                    PlayerPiece p = deferredKillVictims[i];
+                    if (p == null) continue;
+                    if (p == bumpVictim) continue;
+                    killVictimsToAnimate.Add(p);
+                }
+            }
+
             if (basePiecesToApply.Count > 0)
             {
                 if (movedPiecesThisUpdate.Count == 0)
                 {
-                    ApplyDeferredOopsBaseStatesNow(basePiecesToApply);
+                    ApplyDeferredOopsBaseStatesNow(basePiecesToApply, killVictimsToAnimate);
                 }
                 else
                 {
@@ -1768,7 +1789,7 @@ public class GameManager : MonoBehaviour
                         StopCoroutine(oopsDeferredBaseApplyCoroutine);
                         oopsDeferredBaseApplyCoroutine = null;
                     }
-                    oopsDeferredBaseApplyCoroutine = StartCoroutine(ApplyDeferredOopsBaseStatesAfterMoves(updateSeq, basePiecesToApply, movedPiecesThisUpdate));
+                    oopsDeferredBaseApplyCoroutine = StartCoroutine(ApplyDeferredOopsBaseStatesAfterMoves(updateSeq, basePiecesToApply, killVictimsToAnimate, movedPiecesThisUpdate));
                 }
             }
         }
@@ -1897,9 +1918,17 @@ public class GameManager : MonoBehaviour
 
     private float GetEffectiveTurnCountdownSeconds()
     {
-        if (IsPlayWithOopsMode && oopsUseFastTurnTimers)
+        if (IsPlayWithOopsMode)
         {
-            return oopsTurnCountdownSeconds;
+            if (oopsUseFastTurnTimers)
+            {
+                return oopsTurnCountdownSeconds;
+            }
+
+            if (currentPlayer == LocalPlayerNumber)
+            {
+                return oopsLocalFirstTurnPending ? 30f : 10f;
+            }
         }
 
         return turnCountdownSeconds;
@@ -1907,9 +1936,17 @@ public class GameManager : MonoBehaviour
 
     private float GetEffectiveTurnCountdownExtraSeconds()
     {
-        if (IsPlayWithOopsMode && oopsUseFastTurnTimers)
+        if (IsPlayWithOopsMode)
         {
-            return oopsTurnCountdownExtraSeconds;
+            if (oopsUseFastTurnTimers)
+            {
+                return oopsTurnCountdownExtraSeconds;
+            }
+
+            if (currentPlayer == LocalPlayerNumber)
+            {
+                return oopsLocalFirstTurnPending ? 10f : 0f;
+            }
         }
 
         return turnCountdownExtraSeconds;
@@ -1933,19 +1970,34 @@ public class GameManager : MonoBehaviour
         ForceRecoverTurn("oops auto watchdog timeout");
     }
 
-    private void ApplyDeferredOopsBaseStatesNow(List<PlayerPiece> basePieces)
+    private void ApplyDeferredOopsBaseStatesNow(List<PlayerPiece> basePieces, List<PlayerPiece> killVictimsToAnimate = null)
     {
         if (basePieces == null || basePieces.Count == 0) return;
+
+        HashSet<PlayerPiece> killSet = null;
+        if (IsPlayWithOopsMode && killVictimsToAnimate != null && killVictimsToAnimate.Count > 0)
+        {
+            killSet = new HashSet<PlayerPiece>(killVictimsToAnimate);
+        }
 
         for (int i = 0; i < basePieces.Count; i++)
         {
             PlayerPiece p = basePieces[i];
             if (p == null) continue;
-            p.ApplyServerBaseState();
+
+            bool wantsKillAnim = killSet != null && killSet.Contains(p);
+            if (wantsKillAnim && !p.IsBusy)
+            {
+                StartCoroutine(p.AnimateOopsKillReturnHomeAndFinalize(p));
+            }
+            else
+            {
+                p.ApplyServerBaseState();
+            }
         }
     }
 
-    private IEnumerator ApplyDeferredOopsBaseStatesAfterMoves(int updateSeq, List<PlayerPiece> basePieces, List<PlayerPiece> movedPieces)
+    private IEnumerator ApplyDeferredOopsBaseStatesAfterMoves(int updateSeq, List<PlayerPiece> basePieces, List<PlayerPiece> killVictimsToAnimate, List<PlayerPiece> movedPieces)
     {
         float timeout = 6f;
         float t = 0f;
@@ -1975,7 +2027,7 @@ public class GameManager : MonoBehaviour
             yield return null;
         }
 
-        ApplyDeferredOopsBaseStatesNow(basePieces);
+        ApplyDeferredOopsBaseStatesNow(basePieces, killVictimsToAnimate);
     }
 
     private int GetOopsRoutePathLengthForPlayer(int playerNumber)
@@ -4236,17 +4288,23 @@ public class GameManager : MonoBehaviour
         if (currentPlayer != LocalPlayerNumber) return;
         if (cardPicked) return;
 
-        if (!isExtraPhase) return;
+        if (!oopsUseFastTurnTimers)
+        {
+            float phaseSeconds = isExtraPhase ? GetEffectiveTurnCountdownExtraSeconds() : GetEffectiveTurnCountdownSeconds();
+            bool isTenSecondPhase = phaseSeconds >= 9.5f && phaseSeconds <= 10.5f;
+            if (!isTenSecondPhase) return;
+            if (remainingSeconds > 8f) return;
+        }
+        else
+        {
+            if (!isExtraPhase) return;
 
-        float extraSeconds = GetEffectiveTurnCountdownExtraSeconds();
+            float extraSeconds = GetEffectiveTurnCountdownExtraSeconds();
 
-        // Support very small timers for testing. Fire at the very start of the extra phase.
-        // (remainingSeconds starts near extraSeconds and counts down.)
-        float openWindow = Mathf.Max(0.02f, Mathf.Min(0.25f, extraSeconds * 0.25f));
+            float openWindow = Mathf.Max(0.02f, Mathf.Min(0.25f, extraSeconds * 0.25f));
 
-        // Extra countdown: auto pick right at the start of the extra timer.
-        // (We intentionally do nothing during the main timer.)
-        if (remainingSeconds < (extraSeconds - openWindow)) return;
+            if (remainingSeconds < (extraSeconds - openWindow)) return;
+        }
 
         CardClickHandler cardToOpen = null;
         if (pendingOopsOpenCard != null && pendingOopsOpenCard.gameObject.activeInHierarchy && IsCardUnderDeckShadow(pendingOopsOpenCard))
@@ -4304,15 +4362,23 @@ public class GameManager : MonoBehaviour
         if (!cardPicked) return false;
         if (cardAnimationLock) return false;
 
-        if (!isExtraPhase) return false;
+        if (!oopsUseFastTurnTimers)
+        {
+            float phaseSeconds = isExtraPhase ? GetEffectiveTurnCountdownExtraSeconds() : GetEffectiveTurnCountdownSeconds();
+            bool isTenSecondPhase = phaseSeconds >= 9.5f && phaseSeconds <= 10.5f;
+            if (!isTenSecondPhase) return false;
+            if (remainingSeconds > 3f) return false;
+        }
+        else
+        {
+            if (!isExtraPhase) return false;
 
-        float extraSeconds = GetEffectiveTurnCountdownExtraSeconds();
+            float extraSeconds = GetEffectiveTurnCountdownExtraSeconds();
 
-        // Support very small timers for testing. Use a relative move window within the extra timer.
-        // Example: extraSeconds=1.0 => allow moves roughly after first ~20% of the timer, until near the end.
-        float moveStartAfter = Mathf.Clamp(extraSeconds * 0.20f, 0.05f, 0.60f);
-        float moveEndBefore = Mathf.Clamp(extraSeconds * 0.10f, 0.02f, 0.30f);
-        if (remainingSeconds > (extraSeconds - moveStartAfter) || remainingSeconds <= moveEndBefore) return false;
+            float moveStartAfter = Mathf.Clamp(extraSeconds * 0.20f, 0.05f, 0.60f);
+            float moveEndBefore = Mathf.Clamp(extraSeconds * 0.10f, 0.02f, 0.30f);
+            if (remainingSeconds > (extraSeconds - moveStartAfter) || remainingSeconds <= moveEndBefore) return false;
+        }
 
         List<PlayerPiece> pieces = GetPiecesForPlayer(currentPlayer);
         if (pieces == null || pieces.Count == 0) return false;
@@ -4653,21 +4719,24 @@ public class GameManager : MonoBehaviour
             if (!turnCountdownExtraGranted)
             {
                 turnCountdownExtraGranted = true;
-                dur = Mathf.Max(1f, GetEffectiveTurnCountdownExtraSeconds());
+                float extra = GetEffectiveTurnCountdownExtraSeconds();
+                if (extra <= 0.01f)
+                {
+                    yield break;
+                }
+                dur = Mathf.Max(1f, extra);
                 remaining = dur;
                 fill.fillAmount = 1f;
                 fill.color = normalColor;
-
-                if (timerText != null)
-                {
-                    int secs = Mathf.CeilToInt(remaining);
-                    timerText.text = secs.ToString();
-                }
                 continue;
             }
 
             if (IsPlayWithOopsMode)
             {
+                if (!oopsUseFastTurnTimers && currentPlayer == LocalPlayerNumber && oopsLocalFirstTurnPending && turnCountdownExtraGranted)
+                {
+                    oopsLocalFirstTurnPending = false;
+                }
                 fill.fillAmount = 0f;
                 if (timerText != null)
                 {
@@ -5743,7 +5812,14 @@ public class GameManager : MonoBehaviour
                 Debug.Log($"💥 BUMP! Player {moverPlayer} Piece {movedPiece.pieceNumber} landed on opponent piece {other.pieceNumber}. Sending opponent back to START.");
                 other.SyncCurrentPathIndexFromTransform();
                 int fromIndex = other.GetCurrentPathIndex();
-                other.ReturnToHome();
+                if (!IsPlayWithOopsMode && !other.IsBusy)
+                {
+                    StartCoroutine(other.AnimateOopsKillReturnHomeAndFinalize(other));
+                }
+                else
+                {
+                    other.ReturnToHome();
+                }
                 other.SyncCurrentPathIndexFromTransform();
                 int toIndex = other.GetCurrentPathIndex();
                 LogOopsMove(other, fromIndex, toIndex, "KILL");
@@ -5792,7 +5868,14 @@ public class GameManager : MonoBehaviour
                 Debug.Log($"💥 SLIDE BUMP! Piece {movedPiece.pieceNumber} landed on piece {other.pieceNumber}. Sending it back to START.");
                 other.SyncCurrentPathIndexFromTransform();
                 int fromIndex = other.GetCurrentPathIndex();
-                other.ReturnToHome();
+                if (!IsPlayWithOopsMode && !other.IsBusy)
+                {
+                    StartCoroutine(other.AnimateOopsKillReturnHomeAndFinalize(other));
+                }
+                else
+                {
+                    other.ReturnToHome();
+                }
                 other.SyncCurrentPathIndexFromTransform();
                 int toIndex = other.GetCurrentPathIndex();
                 LogOopsMove(other, fromIndex, toIndex, "KILL");
@@ -6723,6 +6806,8 @@ public class GameManager : MonoBehaviour
         oopsSplitMoveSent = false;
         oopsSplitFirstPawnId = 0;
         oopsSplitFirstSteps = 0;
+
+        oopsLocalFirstTurnPending = true;
 
         isSplitMode = false;
         remainingSteps = 0;

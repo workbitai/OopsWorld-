@@ -277,6 +277,10 @@ public class PlayerPiece : MonoBehaviour
 
     private static bool isOopsBumpAnimating = false;
 
+    private static bool isOopsKillReturnAnimating = false;
+
+    private static bool isOopsSorryReplaceAnimating = false;
+
     [Header("Card 11 Swap Animation")]
     [Range(0.05f, 1.25f)]
     [SerializeField] private float card11SwapDuration = 0.35f;
@@ -1185,6 +1189,140 @@ public class PlayerPiece : MonoBehaviour
         isOopsBumpAnimating = false;
     }
 
+    public IEnumerator AnimateOopsKillReturnHomeAndFinalize(PlayerPiece victim)
+    {
+        if (victim == null)
+        {
+            yield break;
+        }
+
+        if (isOopsKillReturnAnimating)
+        {
+            yield break;
+        }
+
+        Transform victimHome = victim.homeTransform;
+        if (victimHome == null)
+        {
+            yield break;
+        }
+
+        isOopsKillReturnAnimating = true;
+
+        victim.StopTurnHighlight();
+        if (gameManager != null)
+        {
+            gameManager.StopAllTurnPieceHighlights();
+        }
+
+        victim.isMoving = true;
+
+        Transform vMovementRoot = victim.GetMovementRoot();
+        if (vMovementRoot != null)
+        {
+            RectTransform vRt = victim.transform as RectTransform;
+            if (vRt != null)
+            {
+                vRt.SetParent(vMovementRoot, true);
+            }
+            else
+            {
+                victim.transform.SetParent(vMovementRoot, true);
+            }
+        }
+        else
+        {
+            victim.transform.SetParent(null, true);
+        }
+
+        Vector3 vStart = victim.transform.position;
+        Vector3 vEnd = victim.GetWorldPositionWithYOffset(victimHome);
+
+        Vector3 vMid = (vStart + vEnd) * 0.5f;
+        Vector3 vDir = vEnd - vStart;
+        Vector3 vPerp = vDir.sqrMagnitude > 0.0001f ? Vector3.Cross(vDir.normalized, Vector3.forward) : Vector3.down;
+
+        float curve = card11SwapCurveAmount;
+        Vector3 vControl = vMid - (vPerp * curve);
+
+        float duration = Mathf.Max(0.01f, card11SwapDuration);
+        float t = 0f;
+        while (t < duration)
+        {
+            t += Time.deltaTime;
+            float u = Mathf.Clamp01(t / duration);
+            float eased = u * u * (3f - 2f * u);
+
+            victim.transform.position = EvaluateQuadraticBezier(vStart, vControl, vEnd, eased);
+            yield return null;
+        }
+
+        victim.transform.position = vEnd;
+
+        victim.ReturnToHome();
+        victim.RecalculateCurrentPathIndexFromParent();
+
+        ClearAllPiecesHighlights();
+        DisableSwapTargetHighlightForOpponent();
+
+        victim.isMoving = false;
+        isOopsKillReturnAnimating = false;
+    }
+
+    public IEnumerator AnimateOopsMoveToTargetAndFinalize(PlayerPiece piece, Transform targetPos)
+    {
+        if (piece == null || targetPos == null)
+        {
+            yield break;
+        }
+
+        Transform movementRoot = piece.GetMovementRoot();
+        if (movementRoot != null)
+        {
+            RectTransform rt = piece.transform as RectTransform;
+            if (rt != null)
+            {
+                rt.SetParent(movementRoot, true);
+            }
+            else
+            {
+                piece.transform.SetParent(movementRoot, true);
+            }
+        }
+        else
+        {
+            piece.transform.SetParent(null, true);
+        }
+
+        piece.isMoving = true;
+
+        Vector3 start = piece.transform.position;
+        Vector3 end = piece.GetWorldPositionWithYOffset(targetPos);
+        Vector3 mid = (start + end) * 0.5f;
+
+        Vector3 dir = end - start;
+        Vector3 perp = dir.sqrMagnitude > 0.0001f ? Vector3.Cross(dir.normalized, Vector3.forward) : Vector3.up;
+        float curve = card11SwapCurveAmount;
+        Vector3 control = mid + (perp * curve);
+
+        float duration = Mathf.Max(0.01f, card11SwapDuration);
+        float t = 0f;
+        while (t < duration)
+        {
+            t += Time.deltaTime;
+            float u = Mathf.Clamp01(t / duration);
+            float eased = u * u * (3f - 2f * u);
+
+            piece.transform.position = EvaluateQuadraticBezier(start, control, end, eased);
+            yield return null;
+        }
+
+        piece.transform.position = end;
+        piece.ForceSetParentOnly(targetPos);
+        piece.RecalculateCurrentPathIndexFromParent();
+        piece.isMoving = false;
+    }
+
     private static Vector3 EvaluateQuadraticBezier(Vector3 p0, Vector3 p1, Vector3 p2, float t)
     {
         float u = 1f - t;
@@ -1619,23 +1757,40 @@ public class PlayerPiece : MonoBehaviour
             gameManager.StopAllTurnPieceHighlights();
         }
 
-        ReturnToHome();
-
-        startPawn.ForceSetParentOnly(targetPos);
-        startPawn.RecalculateCurrentPathIndexFromParent();
-
         ClearAllPiecesHighlights();
         DisableSorryTargetHighlightForOpponent();
 
-        StartCoroutine(SorryReplaceAndSlideRoutine(startPawn, targetPos));
+        StartCoroutine(SorryReplaceAndSlideRoutine(startPawn, targetPos, this));
     }
 
-    private IEnumerator SorryReplaceAndSlideRoutine(PlayerPiece startPawn, Transform targetPos)
+    private IEnumerator SorryReplaceAndSlideRoutine(PlayerPiece startPawn, Transform targetPos, PlayerPiece victim)
     {
         if (startPawn == null || targetPos == null || gameManager == null)
         {
             yield break;
         }
+
+        if (isOopsSorryReplaceAnimating)
+        {
+            yield break;
+        }
+
+        isOopsSorryReplaceAnimating = true;
+
+        if (victim != null)
+        {
+            victim.SyncCurrentPathIndexFromTransform();
+            if (!victim.IsAtHome() && !victim.IsBusy)
+            {
+                StartCoroutine(victim.AnimateOopsKillReturnHomeAndFinalize(victim));
+            }
+            else
+            {
+                victim.ReturnToHome();
+            }
+        }
+
+        yield return StartCoroutine(AnimateOopsMoveToTargetAndFinalize(startPawn, targetPos));
 
         yield return null;
 
@@ -1647,6 +1802,8 @@ public class PlayerPiece : MonoBehaviour
         }
 
         gameManager.CompleteSorryMode();
+
+        isOopsSorryReplaceAnimating = false;
     }
 
     void EnableSorryTargetHighlightForOpponent()
