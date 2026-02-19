@@ -300,7 +300,7 @@ public class GameManager : MonoBehaviour
 
     private IEnumerator ShowWinPopupAfterDelay(int winner)
     {
-        yield return new WaitForSecondsRealtime(2f);
+        yield return new WaitForSecondsRealtime(0.8f);
 
         PopupHandler popupHandler = FindObjectOfType<PopupHandler>();
         if (popupHandler != null)
@@ -3047,6 +3047,9 @@ public class GameManager : MonoBehaviour
     [Header("Lobby Rewards")]
     [SerializeField] private long selectedLobbyWinningCoin = 0;
     [SerializeField] private long selectedLobbyWinningDiamond = 0;
+    [SerializeField] private long selectedLobbyWinningOfflineStar = 0;
+
+    [SerializeField] private bool currentMatchUsesOfflineStarRewards = false;
 
     private GameObject activeBoardRoot = null;
 
@@ -3122,6 +3125,8 @@ public class GameManager : MonoBehaviour
     public int LocalPlayerNumber => Mathf.Clamp(localPlayerNumber, 1, 4);
     public long SelectedLobbyWinningCoin => selectedLobbyWinningCoin;
     public long SelectedLobbyWinningDiamond => selectedLobbyWinningDiamond;
+    public long SelectedLobbyWinningOfflineStar => selectedLobbyWinningOfflineStar;
+    public bool CurrentMatchUsesOfflineStarRewards => currentMatchUsesOfflineStarRewards;
 
     private GameObject activeDailyBonusInstance = null;
     private Coroutine dailyBonusCoroutine = null;
@@ -6154,6 +6159,16 @@ public class GameManager : MonoBehaviour
     {
         selectedLobbyWinningCoin = Math.Max(0L, winningCoin);
         selectedLobbyWinningDiamond = Math.Max(0L, winningDiamond);
+    }
+
+    public void SetSelectedLobbyOfflineStarReward(long winningStar)
+    {
+        selectedLobbyWinningOfflineStar = Math.Max(0L, winningStar);
+    }
+
+    public void SetCurrentMatchUsesOfflineStarRewards(bool usesOfflineStars)
+    {
+        currentMatchUsesOfflineStarRewards = usesOfflineStars;
     }
 
     public void SetPlayerName(string name, bool saveToPrefs)

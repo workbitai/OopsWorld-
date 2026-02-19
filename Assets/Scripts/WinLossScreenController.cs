@@ -15,8 +15,11 @@ public class WinLossScreenController : MonoBehaviour
     [Header("Rewards")]
     [SerializeField] private GameObject winningCoinImage;
     [SerializeField] private GameObject winningDiamondImage;
+    [SerializeField] private GameObject winningStarImage;
     [SerializeField] private TMP_Text winningCoinText;
     [SerializeField] private TMP_Text winningDiamondText;
+    [SerializeField] private TMP_Text winningStarText;
+    [SerializeField] private Sprite offlineStarSprite;
 
     [Header("Bottom")]
     [SerializeField] private Image winnerImage;
@@ -51,13 +54,22 @@ public class WinLossScreenController : MonoBehaviour
     [SerializeField] private bool playRewardTransferOnOpen = false;
     [SerializeField] private RectTransform coinPrefab;
     [SerializeField] private RectTransform diamondPrefab;
+    [SerializeField] private RectTransform starPrefab;
     [SerializeField] private RectTransform spawnRoot;
     [SerializeField] private RectTransform coinSpawnFrom;
     [SerializeField] private RectTransform diamondSpawnFrom;
+    [SerializeField] private RectTransform starSpawnFrom;
     [SerializeField] private RectTransform coinTarget;
     [SerializeField] private RectTransform diamondTarget;
+    [SerializeField] private RectTransform starTarget;
     [SerializeField] private TMP_Text coinTargetValueText;
     [SerializeField] private TMP_Text diamondTargetValueText;
+    [SerializeField] private TMP_Text starTargetValueText;
+
+    [Header("Optional HUD Roots")]
+    [SerializeField] private GameObject coinHudRoot;
+    [SerializeField] private GameObject diamondHudRoot;
+    [SerializeField] private GameObject starHudRoot;
     [SerializeField] private int burstCount = 10;
     [SerializeField] private float burstStagger = 0.03f;
     [SerializeField] private float transferStartDelay = 0.05f;
@@ -92,6 +104,32 @@ public class WinLossScreenController : MonoBehaviour
         int winner = Mathf.Clamp(winnerPlayerNumber, 1, 4);
         bool localWon = winner == local;
 
+        GameManager gm = GameManager.Instance;
+        bool offlineStarMatch = gm != null && gm.CurrentMatchUsesOfflineStarRewards;
+
+        if (offlineStarMatch)
+        {
+            if (coinHudRoot != null) coinHudRoot.SetActive(false);
+            if (diamondHudRoot != null) diamondHudRoot.SetActive(false);
+            if (starHudRoot != null) starHudRoot.SetActive(true);
+        }
+        else
+        {
+            if (coinHudRoot != null) coinHudRoot.SetActive(true);
+            if (diamondHudRoot != null) diamondHudRoot.SetActive(true);
+            if (starHudRoot != null) starHudRoot.SetActive(false);
+        }
+
+        SetActiveSafe(winningCoinImage, localWon && !offlineStarMatch);
+        SetActiveSafe(winningDiamondImage, localWon && !offlineStarMatch);
+        SetActiveSafe(winningStarImage, localWon && offlineStarMatch);
+
+        if (offlineStarMatch && winningStarImage != null && offlineStarSprite != null)
+        {
+            Image img = winningStarImage.GetComponent<Image>();
+            if (img != null) img.sprite = offlineStarSprite;
+        }
+
         cachedLocalWon = localWon;
         cachedWinCoinAmount = ClampToInt(winCoinAmount);
         cachedWinDiamondAmount = ClampToInt(winDiamondAmount);
@@ -110,19 +148,22 @@ public class WinLossScreenController : MonoBehaviour
             }
         }
 
-        SetActiveSafe(winningCoinImage, localWon);
-        SetActiveSafe(winningDiamondImage, localWon);
-
         if (winningCoinText != null)
         {
-            winningCoinText.text = localWon ? winCoinAmount.ToString() : string.Empty;
-            winningCoinText.gameObject.SetActive(localWon);
+            winningCoinText.text = (localWon && !offlineStarMatch) ? winCoinAmount.ToString() : string.Empty;
+            winningCoinText.gameObject.SetActive(localWon && !offlineStarMatch);
+        }
+
+        if (winningStarText != null)
+        {
+            winningStarText.text = (localWon && offlineStarMatch) ? winCoinAmount.ToString() : string.Empty;
+            winningStarText.gameObject.SetActive(localWon && offlineStarMatch);
         }
 
         if (winningDiamondText != null)
         {
-            winningDiamondText.text = localWon ? winDiamondAmount.ToString() : string.Empty;
-            winningDiamondText.gameObject.SetActive(localWon);
+            winningDiamondText.text = (localWon && !offlineStarMatch) ? winDiamondAmount.ToString() : string.Empty;
+            winningDiamondText.gameObject.SetActive(localWon && !offlineStarMatch);
         }
 
         if (winnerImage != null)
@@ -180,6 +221,16 @@ public class WinLossScreenController : MonoBehaviour
         }
 
         lastCreditedMatchKey = matchKey;
+
+        if (gm.CurrentMatchUsesOfflineStarRewards)
+        {
+            if (coinAmount > 0)
+            {
+                if (PlayerWallet.Instance != null) PlayerWallet.Instance.AddOfflineStars(coinAmount);
+                else PlayerWallet.SetOfflineStarsForCurrentUser(PlayerWallet.GetOfflineStarsForCurrentUser() + coinAmount);
+            }
+            return;
+        }
 
         GameWalletApi.CreditUpdate(
             coinsAmount: coinAmount > 0 ? coinAmount : null,
@@ -272,10 +323,14 @@ public class WinLossScreenController : MonoBehaviour
         t += stg;
         AppendTarget(GetRectTransform(winningDiamondImage), baseTime + t, dur);
         t += stg;
+        AppendTarget(GetRectTransform(winningStarImage), baseTime + t, dur);
+        t += stg;
 
         AppendTarget(GetRectTransform(winningCoinText), baseTime + t, dur);
         t += stg;
         AppendTarget(GetRectTransform(winningDiamondText), baseTime + t, dur);
+        t += stg;
+        AppendTarget(GetRectTransform(winningStarText), baseTime + t, dur);
         t += stg;
 
         AppendTarget(GetRectTransform(winnerImage), baseTime + t, dur);
@@ -340,8 +395,10 @@ public class WinLossScreenController : MonoBehaviour
         CacheOne(GetRectTransform(winLossBannerImage));
         CacheOne(GetRectTransform(winningCoinImage));
         CacheOne(GetRectTransform(winningDiamondImage));
+        CacheOne(GetRectTransform(winningStarImage));
         CacheOne(GetRectTransform(winningCoinText));
         CacheOne(GetRectTransform(winningDiamondText));
+        CacheOne(GetRectTransform(winningStarText));
         CacheOne(GetRectTransform(winnerImage));
         CacheOne(GetRectTransform(loserImage));
 
@@ -403,8 +460,10 @@ public class WinLossScreenController : MonoBehaviour
 
         SetHiddenFor(GetRectTransform(winningCoinImage), new Vector2(0f, rewardsFromOffsetY));
         SetHiddenFor(GetRectTransform(winningDiamondImage), new Vector2(0f, rewardsFromOffsetY));
+        SetHiddenFor(GetRectTransform(winningStarImage), new Vector2(0f, rewardsFromOffsetY));
         SetHiddenFor(GetRectTransform(winningCoinText), new Vector2(0f, rewardsFromOffsetY));
         SetHiddenFor(GetRectTransform(winningDiamondText), new Vector2(0f, rewardsFromOffsetY));
+        SetHiddenFor(GetRectTransform(winningStarText), new Vector2(0f, rewardsFromOffsetY));
 
         SetHiddenFor(GetRectTransform(winnerImage), new Vector2(0f, bottomFromOffsetY));
         SetHiddenFor(GetRectTransform(loserImage), new Vector2(0f, bottomFromOffsetY));
@@ -456,6 +515,39 @@ public class WinLossScreenController : MonoBehaviour
         KillTransferTweens();
 
         if (!cachedLocalWon) return;
+
+        GameManager gm = GameManager.Instance;
+        bool offlineStarMatch = gm != null && gm.CurrentMatchUsesOfflineStarRewards;
+
+        if (offlineStarMatch)
+        {
+            bool hasStar = cachedWinCoinAmount > 0 && starPrefab != null;
+            if (!hasStar) return;
+
+            TryCreditWinRewards(true, cachedWinCoinAmount, 0);
+
+            if (spawnRoot == null)
+            {
+                Canvas c = GetComponentInParent<Canvas>();
+                if (c != null)
+                {
+                    spawnRoot = (c.rootCanvas != null ? c.rootCanvas.transform : c.transform) as RectTransform;
+                }
+            }
+
+            Canvas.ForceUpdateCanvases();
+
+            float starStartDelay = Mathf.Max(0f, transferStartDelay);
+            float starDur = Mathf.Max(0.01f, flyDuration);
+            float starStg = Mathf.Max(0f, burstStagger);
+
+            TMP_Text fromWinText = winningStarText != null ? winningStarText : winningCoinText;
+            RectTransform fromWinImage = GetRectTransform(winningStarImage != null ? winningStarImage : winningCoinImage);
+
+            StartValueTransfer(fromWinText, starTargetValueText, cachedWinCoinAmount, starStartDelay, starDur + ((Mathf.Max(1, burstCount) - 1) * starStg));
+            AppendBurst(starPrefab, starSpawnFrom != null ? starSpawnFrom : fromWinImage, starTarget, starStartDelay, starDur, starStg);
+            return;
+        }
 
         bool hasCoin = cachedWinCoinAmount > 0 && coinPrefab != null;
         bool hasDiamond = cachedWinDiamondAmount > 0 && diamondPrefab != null;
@@ -606,8 +698,10 @@ public class WinLossScreenController : MonoBehaviour
 
         if (winningCoinText != null) DOTween.Kill(winningCoinText);
         if (winningDiamondText != null) DOTween.Kill(winningDiamondText);
+        if (winningStarText != null) DOTween.Kill(winningStarText);
         if (coinTargetValueText != null) DOTween.Kill(coinTargetValueText);
         if (diamondTargetValueText != null) DOTween.Kill(diamondTargetValueText);
+        if (starTargetValueText != null) DOTween.Kill(starTargetValueText);
 
         for (int i = spawnedRewardItems.Count - 1; i >= 0; i--)
         {

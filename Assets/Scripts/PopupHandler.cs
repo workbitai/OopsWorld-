@@ -94,11 +94,19 @@ public class PopupHandler : MonoBehaviour
                 DailyTaskPrefs.AddProgress(DailyTaskPrefs.TaskId.Win3Times, 1, 3);
             }
 
+            long winCoin = gm.SelectedLobbyWinningCoin;
+            long winDiamond = gm.SelectedLobbyWinningDiamond;
+            if (gm.CurrentMatchUsesOfflineStarRewards)
+            {
+                winCoin = gm.SelectedLobbyWinningOfflineStar;
+                winDiamond = 0;
+            }
+
             controller.ShowResult(
                 winningPlayer,
                 gm.LocalPlayerNumber,
-                gm.SelectedLobbyWinningCoin,
-                gm.SelectedLobbyWinningDiamond,
+                winCoin,
+                winDiamond,
                 gm.PlayerAvatarSprite
             );
         }

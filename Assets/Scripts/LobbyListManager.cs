@@ -33,6 +33,7 @@ public class LobbyListManager : MonoBehaviour
     [SerializeField] private bool populateFromGameWalletApi = false;
     [SerializeField] private LobbyPlayerCount populatePlayerCount = LobbyPlayerCount.TwoPlayers;
     [SerializeField] private LobbyItemView lobbyItemPrefab;
+    [SerializeField] private LobbyItemView offlineLobbyItemPrefab;
     [SerializeField] private Transform lobbyItemsRoot;
 
     [Header("Static (Optional)")]
@@ -49,6 +50,17 @@ public class LobbyListManager : MonoBehaviour
     }
 
     [SerializeField] private List<StaticLobbyConfig> staticLobbyConfigs = new List<StaticLobbyConfig>();
+
+    [Serializable]
+    private class StaticOfflineLobbyConfig
+    {
+        public string lobbyId;
+        public long winningStar;
+        public long entryStar;
+        public bool isLocked;
+    }
+
+    [SerializeField] private List<StaticOfflineLobbyConfig> staticOfflineLobbyConfigs = new List<StaticOfflineLobbyConfig>();
 
     private bool initialPopulateFromGameWalletApi;
     private bool initialPopulateFromStaticConfigs;
@@ -312,8 +324,30 @@ public class LobbyListManager : MonoBehaviour
     private void PopulateFromStaticConfigsInternal()
     {
         if (!populateFromStaticConfigs) return;
-        if (lobbyItemPrefab == null || lobbyItemsRoot == null) return;
-        if (staticLobbyConfigs == null) return;
+        if (lobbyItemsRoot == null) return;
+
+        if (gameManager == null)
+        {
+            gameManager = FindObjectOfType<GameManager>();
+        }
+
+        bool offlineNow = Application.internetReachability == NetworkReachability.NotReachable;
+        bool useOfflineConfigs = offlineNow && gameManager != null && gameManager.IsLocalOfflineFriendsMode;
+
+        LobbyItemView prefabToUse = useOfflineConfigs
+            ? offlineLobbyItemPrefab
+            : lobbyItemPrefab;
+
+        if (prefabToUse == null) return;
+
+        if (useOfflineConfigs)
+        {
+            if (staticOfflineLobbyConfigs == null) return;
+        }
+        else
+        {
+            if (staticLobbyConfigs == null) return;
+        }
 
         UnhookClicks();
 
@@ -327,24 +361,49 @@ public class LobbyListManager : MonoBehaviour
         spawnedViews.Clear();
         lobbies.Clear();
 
-        for (int i = 0; i < staticLobbyConfigs.Count; i++)
+        if (useOfflineConfigs)
         {
-            StaticLobbyConfig c = staticLobbyConfigs[i];
-            if (c == null) continue;
-
-            LobbyItemView view = Instantiate(lobbyItemPrefab, lobbyItemsRoot);
-            spawnedViews.Add(view);
-
-            var entry = new LobbyEntry
+            for (int i = 0; i < staticOfflineLobbyConfigs.Count; i++)
             {
-                view = view,
-                lobbyId = c.lobbyId,
-                winningCoin = c.winningCoin,
-                winningDiamond = c.winningDiamond,
-                entryCoin = c.entryCoin,
-                isLocked = c.isLocked
-            };
-            lobbies.Add(entry);
+                StaticOfflineLobbyConfig c = staticOfflineLobbyConfigs[i];
+                if (c == null) continue;
+
+                LobbyItemView view = Instantiate(prefabToUse, lobbyItemsRoot);
+                spawnedViews.Add(view);
+
+                var entry = new LobbyEntry
+                {
+                    view = view,
+                    lobbyId = c.lobbyId,
+                    winningCoin = c.winningStar,
+                    winningDiamond = 0,
+                    entryCoin = c.entryStar,
+                    isLocked = c.isLocked
+                };
+                lobbies.Add(entry);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < staticLobbyConfigs.Count; i++)
+            {
+                StaticLobbyConfig c = staticLobbyConfigs[i];
+                if (c == null) continue;
+
+                LobbyItemView view = Instantiate(prefabToUse, lobbyItemsRoot);
+                spawnedViews.Add(view);
+
+                var entry = new LobbyEntry
+                {
+                    view = view,
+                    lobbyId = c.lobbyId,
+                    winningCoin = c.winningCoin,
+                    winningDiamond = c.winningDiamond,
+                    entryCoin = c.entryCoin,
+                    isLocked = c.isLocked
+                };
+                lobbies.Add(entry);
+            }
         }
 
         RefreshAll();
@@ -487,6 +546,16 @@ public class LobbyListManager : MonoBehaviour
         if (gameManager == null)
         {
             gameManager = FindObjectOfType<GameManager>();
+        }
+
+        if (gameManager != null)
+        {
+            bool offlineStarMatch = offlineNow && gameManager.IsLocalOfflineFriendsMode;
+            gameManager.SetCurrentMatchUsesOfflineStarRewards(offlineStarMatch);
+            if (offlineStarMatch)
+            {
+                gameManager.SetSelectedLobbyOfflineStarReward(entry.winningCoin);
+            }
         }
 
         if (gameManager != null && gameManager.IsLocalOfflineFriendsMode)
