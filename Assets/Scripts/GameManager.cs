@@ -892,9 +892,34 @@ public class GameManager : MonoBehaviour
         hasOopsUserTurnListener = true;
     }
 
+    private int ResolveOopsMappedPlayerFromUserIdUsingServerMap(string userId)
+    {
+        if (string.IsNullOrEmpty(userId) || serverUserIdByMappedPlayerNumber == null)
+        {
+            return 0;
+        }
+
+        for (int p = 1; p <= 4; p++)
+        {
+            if (serverUserIdByMappedPlayerNumber.TryGetValue(p, out string id) && !string.IsNullOrEmpty(id))
+            {
+                if (string.Equals(id, userId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return p;
+                }
+            }
+        }
+        return 0;
+    }
+
     private void OnOopsUserTurnReceived(object data)
     {
         if (!IsPlayWithOopsMode) return;
+
+        // Snapshot BEFORE we apply the embedded room update below.
+        // ApplyOopsRoomStateFromServerUpdate can overwrite movingPlayerId (or clear it), which would
+        // break the mismatch rule that is specifically about the previous playCard's movingPlayerId.
+        string movingPlayerIdSnapshot = oopsLastMovingPlayerId;
 
         oopsUserTurnInFlight = false;
         if (oopsLastRoomUpdateSeqWithSnapMove > 0)
@@ -948,6 +973,13 @@ public class GameManager : MonoBehaviour
             }
         }
 
+        int mappedFromEvent = ResolveOopsMappedPlayerFromUserIdUsingServerMap(newTurnUserIdFromEvent);
+        string p1 = serverUserIdByMappedPlayerNumber != null && serverUserIdByMappedPlayerNumber.TryGetValue(1, out string a) ? a : string.Empty;
+        string p2 = serverUserIdByMappedPlayerNumber != null && serverUserIdByMappedPlayerNumber.TryGetValue(2, out string b) ? b : string.Empty;
+        string p3 = serverUserIdByMappedPlayerNumber != null && serverUserIdByMappedPlayerNumber.TryGetValue(3, out string c) ? c : string.Empty;
+        string p4 = serverUserIdByMappedPlayerNumber != null && serverUserIdByMappedPlayerNumber.TryGetValue(4, out string d) ? d : string.Empty;
+        Debug.Log($"PlayWithOops: userTurn mapping | turnIndex='{newTurnUserIdFromEvent}' -> mappedP={mappedFromEvent} | P1='{p1}' P2='{p2}' P3='{p3}' P4='{p4}'");
+
         Debug.Log($"PlayWithOops: userTurn recv | turnIndex={newTurnUserIdFromEvent} movingPlayerId={oopsLastMovingPlayerId} cardPicked={cardPicked} handler={(currentCardHandler != null ? currentCardHandler.name : "<null>")} finalizeArmed={oopsFinalizeCardOnNextUserTurn}");
 
         oopsLastUserTurnCardTime = GetFloat(root, "cardTime", oopsLastUserTurnCardTime);
@@ -971,6 +1003,12 @@ public class GameManager : MonoBehaviour
             ApplyOopsRoomStateFromServerUpdate(data, false, true);
         }
 
+        if (mappedFromEvent >= 1 && mappedFromEvent <= 4 && currentPlayer != mappedFromEvent)
+        {
+            Debug.LogWarning($"PlayWithOops: userTurn currentPlayer mismatch | eventMappedP={mappedFromEvent} currentPlayer={currentPlayer} (forcing to event)");
+            currentPlayer = mappedFromEvent;
+        }
+
         bool didTurnAdvance = currentPlayer != previousPlayer;
         string compareFrom = !string.IsNullOrEmpty(oopsFinalizeArmedTurnUserId) ? oopsFinalizeArmedTurnUserId : previousTurnUserId;
         if (!string.IsNullOrEmpty(compareFrom) && !string.IsNullOrEmpty(newTurnUserIdFromEvent))
@@ -979,13 +1017,15 @@ public class GameManager : MonoBehaviour
         }
 
         // Single rule (requested): playCard's movingPlayerId != userTurn.turnIndex => return card to start.
-        bool shouldReturnCardNow = !string.IsNullOrEmpty(oopsLastMovingPlayerId)
-            && !string.IsNullOrEmpty(newTurnUserIdFromEvent)
-            && !string.Equals(oopsLastMovingPlayerId, newTurnUserIdFromEvent, StringComparison.Ordinal);
+        string movingId = string.IsNullOrEmpty(movingPlayerIdSnapshot) ? string.Empty : movingPlayerIdSnapshot.Trim();
+        string turnId = string.IsNullOrEmpty(newTurnUserIdFromEvent) ? string.Empty : newTurnUserIdFromEvent.Trim();
+        bool shouldReturnCardNow = !string.IsNullOrEmpty(movingId)
+            && !string.IsNullOrEmpty(turnId)
+            && !string.Equals(movingId, turnId, StringComparison.OrdinalIgnoreCase);
 
         if (shouldReturnCardNow)
         {
-            Debug.LogWarning($"PlayWithOops: userTurn mismatch -> return card | movingPlayerId={oopsLastMovingPlayerId} turnIndex={newTurnUserIdFromEvent}");
+            Debug.LogWarning($"PlayWithOops: userTurn mismatch -> return card | movingPlayerId={movingId} turnIndex={turnId} (snapshot)");
 
             if (oopsPendingCardReturnHandler == null)
             {
@@ -5330,6 +5370,7 @@ public class GameManager : MonoBehaviour
         {
             EnsureOopsPlayingCardListener();
             EnsureOopsCardOpenListener();
+            EnsureOopsUserTurnListener();
         }
 
         IList players = GetList(room, "players");

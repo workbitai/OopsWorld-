@@ -1152,19 +1152,6 @@ public class PlayerPiece : MonoBehaviour
         Vector3 aEnd = attacker.GetWorldPositionWithYOffset(attackerTargetPos);
         Vector3 vEnd = victim.GetWorldPositionWithYOffset(victimHome);
 
-        Vector3 aMid = (aStart + aEnd) * 0.5f;
-        Vector3 vMid = (vStart + vEnd) * 0.5f;
-
-        Vector3 aDir = aEnd - aStart;
-        Vector3 vDir = vEnd - vStart;
-
-        Vector3 aPerp = aDir.sqrMagnitude > 0.0001f ? Vector3.Cross(aDir.normalized, Vector3.forward) : Vector3.up;
-        Vector3 vPerp = vDir.sqrMagnitude > 0.0001f ? Vector3.Cross(vDir.normalized, Vector3.forward) : Vector3.down;
-
-        float curve = card11SwapCurveAmount;
-        Vector3 aControl = aMid + (aPerp * curve);
-        Vector3 vControl = vMid - (vPerp * curve);
-
         float duration = Mathf.Max(0.01f, card11SwapDuration);
         float t = 0f;
         while (t < duration)
@@ -1173,19 +1160,38 @@ public class PlayerPiece : MonoBehaviour
             float u = Mathf.Clamp01(t / duration);
             float eased = u * u * (3f - 2f * u);
 
-            attacker.transform.position = EvaluateQuadraticBezier(aStart, aControl, aEnd, eased);
-            victim.transform.position = EvaluateQuadraticBezier(vStart, vControl, vEnd, eased);
+            attacker.transform.position = Vector3.Lerp(aStart, aEnd, eased);
+            victim.transform.position = Vector3.Lerp(vStart, vEnd, eased);
             yield return null;
         }
 
         attacker.transform.position = aEnd;
         victim.transform.position = vEnd;
 
+        float spinDuration = Mathf.Max(0.01f, duration * 0.35f);
+        float spinTime = 0f;
+        Quaternion aRotStart = attacker.transform.rotation;
+        Quaternion aRotEnd = aRotStart * Quaternion.Euler(0f, 0f, 360f);
+        while (spinTime < spinDuration)
+        {
+            spinTime += Time.deltaTime;
+            float u = Mathf.Clamp01(spinTime / spinDuration);
+            float eased = u * u * (3f - 2f * u);
+            attacker.transform.rotation = Quaternion.Slerp(aRotStart, aRotEnd, eased);
+            yield return null;
+        }
+        attacker.transform.rotation = aRotEnd;
+
         int attackerFromIndex = attacker.GetCurrentPathIndex();
         int victimFromIndex = victim.GetCurrentPathIndex();
 
         attacker.ForceSetPosition(attackerTargetPos, attackerTargetIndex);
         victim.ReturnToHome();
+
+        if (attackerTargetPos != null)
+        {
+            attacker.transform.rotation = attackerTargetPos.rotation;
+        }
 
         if (gameManager != null)
         {
@@ -1279,7 +1285,25 @@ public class PlayerPiece : MonoBehaviour
 
         victim.transform.position = vEnd;
 
+        float spinDuration = Mathf.Max(0.01f, duration * 0.35f);
+        float spinTime = 0f;
+        Quaternion vRotStart = victim.transform.rotation;
+        Quaternion vRotEnd = vRotStart * Quaternion.Euler(0f, 0f, 360f);
+        while (spinTime < spinDuration)
+        {
+            spinTime += Time.deltaTime;
+            float u = Mathf.Clamp01(spinTime / spinDuration);
+            float eased = u * u * (3f - 2f * u);
+            victim.transform.rotation = Quaternion.Slerp(vRotStart, vRotEnd, eased);
+            yield return null;
+        }
+        victim.transform.rotation = vRotEnd;
+
         victim.ReturnToHome();
+        if (victimHome != null)
+        {
+            victim.transform.rotation = victimHome.rotation;
+        }
         victim.RecalculateCurrentPathIndexFromParent();
 
         ClearAllPiecesHighlights();
