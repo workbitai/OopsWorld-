@@ -109,6 +109,8 @@ public class PopupHandler : MonoBehaviour
                 winDiamond,
                 gm.PlayerAvatarSprite
             );
+
+            gm.DisconnectOopsSocketAfterMatchEndDelayed(1.0f);
         }
 
         SetBackButtonActive(false);

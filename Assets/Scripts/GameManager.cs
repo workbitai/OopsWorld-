@@ -77,6 +77,8 @@ public class GameManager : MonoBehaviour
     private bool gameplayConnectionPopupOpen;
     private bool gameplayConnectionReturnQueued;
 
+    private Coroutine oopsPostMatchDisconnectCoroutine;
+
     public bool IsVsBotMode => vsBotMode;
     public bool IsLocalOfflineFriendsMode => localOfflineFriendsMode;
     public bool IsOfflineExpertMode => offlineExpertMode;
@@ -2542,6 +2544,26 @@ public class GameManager : MonoBehaviour
         if (pendingOopsOpenCard == target)
         {
             pendingOopsOpenCard = null;
+        }
+
+        if (currentCardHandler != null && currentCardHandler != target && currentCardHandler.gameObject != null && currentCardHandler.gameObject.activeInHierarchy)
+        {
+            if (ShouldDeferOopsCardReturn(currentCardHandler))
+            {
+                DeferOopsCardReturn(currentCardHandler);
+                if (oopsDeferredCardReturnCoroutine != null)
+                {
+                    StopCoroutine(oopsDeferredCardReturnCoroutine);
+                    oopsDeferredCardReturnCoroutine = null;
+                }
+                oopsDeferredCardReturnToken++;
+                int token = oopsDeferredCardReturnToken;
+                oopsDeferredCardReturnCoroutine = StartCoroutine(RetryOopsCardReturnWhenReady(token));
+            }
+            else
+            {
+                currentCardHandler.ReturnCardToStart();
+            }
         }
 
         // For spectator/opponent turns we still need a handler reference so we can return the open card
@@ -6479,6 +6501,65 @@ public class GameManager : MonoBehaviour
         SocketConnection socket = SocketConnection.Instance != null ? SocketConnection.Instance : FindObjectOfType<SocketConnection>();
         if (socket == null) return;
         socket.OnStateChanged -= HandleSocketStateChangedDuringGameplay;
+    }
+
+    public void DisconnectOopsSocketAfterMatchEnd()
+    {
+        if (!IsPlayWithOopsMode) return;
+
+        gameplayConnectionPopupOpen = false;
+        gameplayConnectionReturnQueued = true;
+
+        SocketConnection socket = SocketConnection.Instance != null ? SocketConnection.Instance : FindObjectOfType<SocketConnection>();
+        if (socket != null)
+        {
+            socket.DisconnectManuallySilent();
+            socket.ResetToNoneSilent();
+            socket.SetSuspended(true);
+        }
+
+        hasOopsCardOpenListener = false;
+        hasOopsPlayingCardListener = false;
+        hasOopsUserTurnListener = false;
+
+        if (oopsPostMatchDisconnectCoroutine != null)
+        {
+            StopCoroutine(oopsPostMatchDisconnectCoroutine);
+            oopsPostMatchDisconnectCoroutine = null;
+        }
+        oopsPostMatchDisconnectCoroutine = StartCoroutine(ClearGameplayDisconnectSuppressAfterDelay(1.0f));
+    }
+
+    public void DisconnectOopsSocketAfterMatchEndDelayed(float delaySeconds)
+    {
+        if (!IsPlayWithOopsMode) return;
+
+        if (oopsPostMatchDisconnectCoroutine != null)
+        {
+            StopCoroutine(oopsPostMatchDisconnectCoroutine);
+            oopsPostMatchDisconnectCoroutine = null;
+        }
+        oopsPostMatchDisconnectCoroutine = StartCoroutine(DisconnectOopsSocketAfterDelay(delaySeconds));
+    }
+
+    private IEnumerator DisconnectOopsSocketAfterDelay(float delaySeconds)
+    {
+        if (delaySeconds > 0f)
+        {
+            yield return new WaitForSecondsRealtime(delaySeconds);
+        }
+        DisconnectOopsSocketAfterMatchEnd();
+    }
+
+    private IEnumerator ClearGameplayDisconnectSuppressAfterDelay(float delaySeconds)
+    {
+        if (delaySeconds > 0f)
+        {
+            yield return new WaitForSecondsRealtime(delaySeconds);
+        }
+
+        gameplayConnectionReturnQueued = false;
+        oopsPostMatchDisconnectCoroutine = null;
     }
 
     private void HandleSocketStateChangedDuringGameplay(SocketState state)

@@ -1009,6 +1009,12 @@ public class CardDeckAnimator : MonoBehaviour
             
             // Store power data with card index
             clickHandler.StoreCardPowerData(cardData.power1, cardData.power2, cardData.hasDualPower, cardIndex, cardData.value1, cardData.value2);
+
+            GameManager gm = GameManager.Instance;
+            if (gm == null || !gm.IsPlayWithOopsMode)
+            {
+                clickHandler.UpdateCardNameWithPower(cardIndex);
+            }
             
             // Verify name was updated (especially for first card)
             if (cardIndex == 1)
