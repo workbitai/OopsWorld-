@@ -1762,8 +1762,26 @@ public class PlayerPiece : MonoBehaviour
 
         if (gameManager != null && gameManager.IsPlayWithOopsMode)
         {
-            // PlayWithOops is server-authoritative. SORRY target playCard is not wired yet,
-            // so do not execute local replace.
+            PlayerPiece startPawn0 = gameManager.GetSelectedPieceForSorry();
+            if (startPawn0 == null) return;
+
+            SyncCurrentPathIndexFromTransform();
+            if (IsAtHome()) return;
+            if (IsOnHomePath()) return;
+            if (IsFinishedInHomePath()) return;
+
+            StopTurnHighlight();
+            startPawn0.StopTurnHighlight();
+            gameManager.StopAllTurnPieceHighlights();
+
+            ClearAllPiecesHighlights();
+            DisableSorryTargetHighlightForOpponent();
+
+            bool sent = gameManager.TryOopsPlayCardSorryReplace(startPawn0, this);
+            if (sent)
+            {
+                gameManager.SetSelectedPieceForSorry(null);
+            }
             return;
         }
 

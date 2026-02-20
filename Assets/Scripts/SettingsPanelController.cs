@@ -120,6 +120,13 @@ public class SettingsPanelController : MonoBehaviour
         Save(PREF_MUSIC_ON, on);
         UpdateButtonVisuals(musicButtonImage, on);
         ApplyMusic(on);
+
+        if (SoundManager.Instance != null)
+        {
+            SoundManager.Instance.ApplyMusicPreference();
+            if (on) SoundManager.Instance.PlayMusic();
+            else SoundManager.Instance.StopMusic();
+        }
     }
 
     private void OnSoundButtonClicked()

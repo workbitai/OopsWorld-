@@ -407,6 +407,12 @@ public class GameManager : MonoBehaviour
             DeferOopsCardReturn(currentCardHandler);
         }
 
+        if (movedPiece != null && TryConsumeQueuedOopsPawnMove(movedPiece, out int queuedTargetIndex, out int queuedOriginalSteps, out bool queuedIsSlider, out int queuedBaseIndex))
+        {
+            StartCoroutine(StartQueuedOopsPawnMoveNextFrame(movedPiece, queuedTargetIndex, queuedOriginalSteps, queuedIsSlider, queuedBaseIndex));
+            return;
+        }
+
         oopsUserTurnSendToken++;
         StartCoroutine(SendOopsUserTurnAfterVisualSettle(movedPiece, oopsUserTurnSendToken));
     }
@@ -743,6 +749,55 @@ public class GameManager : MonoBehaviour
                 pieces[i].SetClickable(false);
             }
         }
+
+        EnsureOopsPlayingCardListener();
+        socket.SendWithAck("playCard", payload, OnOopsPlayCardAckReceived);
+        return true;
+    }
+
+    public bool TryOopsPlayCardSorryReplace(PlayerPiece startPawn, PlayerPiece target)
+    {
+        if (!IsPlayWithOopsMode) return false;
+        if (startPawn == null || target == null) return false;
+        if (!isSorryMode) return false;
+
+        startPawn.SyncCurrentPathIndexFromTransform();
+        target.SyncCurrentPathIndexFromTransform();
+
+        if (!startPawn.IsAtHome())
+        {
+            Debug.LogWarning($"PlayWithOops: SORRY blocked (start pawn not in START) P{startPawn.playerNumber}-#{startPawn.pieceNumber}");
+            return false;
+        }
+        if (target.IsAtHome() || target.IsOnHomePath() || target.IsFinishedInHomePath())
+        {
+            Debug.LogWarning($"PlayWithOops: SORRY blocked (invalid target zone) P{target.playerNumber}-#{target.pieceNumber}");
+            return false;
+        }
+
+        SocketConnection socket = SocketConnection.Instance;
+        if (socket == null || socket.CurrentState != SocketState.Connected) return false;
+
+        if (string.IsNullOrEmpty(currentRoomId)) return false;
+
+        if (currentCardHandler == null) return false;
+        string cardId = currentCardHandler.serverCardId;
+        if (string.IsNullOrEmpty(cardId)) return false;
+
+        if (!serverUserIdByMappedPlayerNumber.TryGetValue(target.playerNumber, out string targetUserId) || string.IsNullOrEmpty(targetUserId))
+        {
+            return false;
+        }
+
+        Dictionary<string, object> payload = new Dictionary<string, object>
+        {
+            { "cardId", cardId },
+            { "chosenMoveType", "SORRY" },
+            { "pawnId", startPawn.pieceNumber },
+            { "roomId", currentRoomId },
+            { "targetPawnId", target.pieceNumber },
+            { "targetUserId", targetUserId }
+        };
 
         EnsureOopsPlayingCardListener();
         socket.SendWithAck("playCard", payload, OnOopsPlayCardAckReceived);
@@ -1708,9 +1763,21 @@ public class GameManager : MonoBehaviour
                         if (wantsBumpAnimation)
                         {
                             bumpAttacker = piece;
-                            bumpTargetIndex = position;
-                            bumpTargetTransform = pathManager != null ? pathManager.GetPathPosition(mappedPlayerNumber, position) : null;
-                            RecordOopsRecentPawnTarget(mappedPlayerNumber, pawnId, position, updateSeq);
+
+                            int bumpIndex = position;
+                            if (isSlider && basePosition >= 0)
+                            {
+                                bumpIndex = basePosition;
+
+                                if (position != basePosition)
+                                {
+                                    QueueOopsPawnMove(mappedPlayerNumber, pawnId, position, 0, true, basePosition);
+                                }
+                            }
+
+                            bumpTargetIndex = bumpIndex;
+                            bumpTargetTransform = pathManager != null ? pathManager.GetPathPosition(mappedPlayerNumber, bumpIndex) : null;
+                            RecordOopsRecentPawnTarget(mappedPlayerNumber, pawnId, bumpIndex, updateSeq);
                             continue;
                         }
 
