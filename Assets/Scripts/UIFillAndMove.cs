@@ -154,4 +154,9 @@ public class UIFillAndMove : MonoBehaviour
         target.localScale = Vector3.zero;
         target.DOScale(Vector3.one, scaleInDuration).SetEase(scaleInEase).SetDelay(scaleInDelay);
     }
+    private void Start()
+    {
+        Screen.sleepTimeout = SleepTimeout.NeverSleep;
+
+    }
 }

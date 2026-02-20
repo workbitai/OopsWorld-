@@ -184,6 +184,9 @@ public class GameManager : MonoBehaviour
     private bool oopsFinalizeCardOnNextUserTurn;
     private CardClickHandler oopsPendingCardReturnHandler;
 
+    private Coroutine oopsDeferredCardReturnCoroutine;
+    private int oopsDeferredCardReturnToken;
+
     private bool oopsSplitInProgress;
 
     private bool oopsDeferredUserTurnSend;
@@ -216,6 +219,9 @@ public class GameManager : MonoBehaviour
 
     private bool oopsRoomIsFinished;
     private string oopsRoomWinnerUserId;
+
+    private bool oopsWinPopupQueued;
+    private int oopsQueuedWinnerMappedPlayer;
 
     private void HandleOopsRoomFinishedIfNeeded(string winnerUserId, Dictionary<string, int> userIdToMappedPlayer, IList players)
     {
@@ -284,7 +290,40 @@ public class GameManager : MonoBehaviour
             p.SetClickable(false);
         }
 
+        // The server can mark the room finished while the last pawn move is still animating locally.
+        // Queue the win popup until pieces stop moving so the win screen does not interrupt movement.
+        if (AreAnyPiecesBusy())
+        {
+            oopsWinPopupQueued = true;
+            oopsQueuedWinnerMappedPlayer = winningPlayer;
+            return;
+        }
+
         ScheduleWinPopup(winningPlayer);
+    }
+
+    private bool AreAnyPiecesBusy()
+    {
+        foreach (var p in GetAllActivePieces())
+        {
+            if (p == null) continue;
+            if (p.IsBusy) return true;
+        }
+        return false;
+    }
+
+    private void TryFlushQueuedOopsWinPopup()
+    {
+        if (!IsPlayWithOopsMode) return;
+        if (!oopsWinPopupQueued) return;
+        if (!gameOver) return;
+
+        if (AreAnyPiecesBusy()) return;
+
+        int winner = Mathf.Clamp(oopsQueuedWinnerMappedPlayer, 1, 4);
+        oopsWinPopupQueued = false;
+        oopsQueuedWinnerMappedPlayer = 0;
+        ScheduleWinPopup(winner);
     }
 
     private void ScheduleWinPopup(int winner)
@@ -300,7 +339,7 @@ public class GameManager : MonoBehaviour
 
     private IEnumerator ShowWinPopupAfterDelay(int winner)
     {
-        yield return new WaitForSecondsRealtime(0.8f);
+        yield return new WaitForSecondsRealtime(0.5f);
 
         PopupHandler popupHandler = FindObjectOfType<PopupHandler>();
         if (popupHandler != null)
@@ -325,6 +364,29 @@ public class GameManager : MonoBehaviour
         if (handler == null) return;
 
         oopsPendingCardReturnHandler = handler;
+    }
+
+    private IEnumerator RetryOopsCardReturnWhenReady(int token)
+    {
+        float timeout = 3f;
+        while (timeout > 0f)
+        {
+            if (token != oopsDeferredCardReturnToken) yield break;
+            if (!IsPlayWithOopsMode) yield break;
+
+            CardClickHandler h = oopsPendingCardReturnHandler;
+            if (h == null) yield break;
+
+            if (!ShouldDeferOopsCardReturn(h))
+            {
+                h.ReturnCardToStart();
+                oopsPendingCardReturnHandler = null;
+                yield break;
+            }
+
+            timeout -= Time.unscaledDeltaTime;
+            yield return null;
+        }
     }
 
     public void NotifyOopsServerSwapAnimationCompleted(PlayerPiece movedPiece)
@@ -1023,66 +1085,41 @@ public class GameManager : MonoBehaviour
             && !string.IsNullOrEmpty(turnId)
             && !string.Equals(movingId, turnId, StringComparison.OrdinalIgnoreCase);
 
+        // If mismatch, return the currently open card (immediately if possible, otherwise retry once locks clear).
+        // Also skip any embedded cardOpen/playCard in this same payload to prevent re-opening.
         if (shouldReturnCardNow)
         {
             Debug.LogWarning($"PlayWithOops: userTurn mismatch -> return card | movingPlayerId={movingId} turnIndex={turnId} (snapshot)");
 
-            if (oopsPendingCardReturnHandler == null)
+            CardClickHandler handlerToReturn = oopsPendingCardReturnHandler;
+            if (handlerToReturn == null) handlerToReturn = currentCardHandler;
+            if (handlerToReturn == null) handlerToReturn = CardClickHandler.CurrentClickableCard;
+
+            if (handlerToReturn != null)
             {
-                oopsPendingCardReturnHandler = currentCardHandler;
-                if (oopsPendingCardReturnHandler == null)
+                oopsPendingCardReturnHandler = handlerToReturn;
+
+                if (ShouldDeferOopsCardReturn(handlerToReturn))
                 {
-                    oopsPendingCardReturnHandler = CardClickHandler.CurrentClickableCard;
+                    DeferOopsCardReturn(handlerToReturn);
+
+                    if (oopsDeferredCardReturnCoroutine != null)
+                    {
+                        StopCoroutine(oopsDeferredCardReturnCoroutine);
+                        oopsDeferredCardReturnCoroutine = null;
+                    }
+                    oopsDeferredCardReturnToken++;
+                    int token = oopsDeferredCardReturnToken;
+                    oopsDeferredCardReturnCoroutine = StartCoroutine(RetryOopsCardReturnWhenReady(token));
+                }
+                else
+                {
+                    handlerToReturn.ReturnCardToStart();
+                    oopsPendingCardReturnHandler = null;
                 }
             }
 
-            if (oopsPendingCardReturnHandler != null)
-            {
-                DeferOopsCardReturn(oopsPendingCardReturnHandler);
-            }
-
-            oopsFinalizeCardOnNextUserTurn = true;
-            didTurnAdvance = true;
-        }
-
-        // Apply embedded cardOpen/playCard only when we are NOT finalizing a mismatch return.
-        // Otherwise the card can "return then re-open" within the same userTurn payload.
-        if (!shouldReturnCardNow)
-        {
-            object cardOpen = root.TryGetValue("cardOpen", out object co) ? co : null;
-            if (cardOpen != null)
-            {
-                OnOopsCardOpenReceived(cardOpen);
-            }
-
-            object playCard = root.TryGetValue("playCard", out object pc) ? pc : null;
-            if (playCard != null)
-            {
-                OnOopsPlayingCardReceived(playCard);
-            }
-        }
-
-        // Return/reset ONLY when the single rule triggers.
-        if (oopsFinalizeCardOnNextUserTurn && shouldReturnCardNow)
-        {
-            Debug.LogWarning($"PlayWithOops: userTurn finalize -> ReturnCardToStart | pendingHandler={(oopsPendingCardReturnHandler != null ? oopsPendingCardReturnHandler.name : "<null>")}");
-            oopsFinalizeCardOnNextUserTurn = false;
-            oopsFinalizeArmedTurnUserId = null;
-            oopsFinalizeArmedPlayer = 0;
-            oopsOpenCardOwnerUserId = null;
-            oopsLastMovingPlayerId = null;
-
-            if (oopsPendingCardReturnHandler == null)
-            {
-                oopsPendingCardReturnHandler = currentCardHandler;
-            }
-
-            if (oopsPendingCardReturnHandler != null)
-            {
-                oopsPendingCardReturnHandler.ReturnCardToStart();
-            }
-            oopsPendingCardReturnHandler = null;
-
+            // Reset local card/mode state so we don't stay stuck in the previous card.
             isSplitMode = false;
             remainingSteps = 0;
             selectedPieceForSplit = null;
@@ -1102,6 +1139,26 @@ public class GameManager : MonoBehaviour
             currentCardPower1 = "";
             currentCardPower2 = "";
             currentCardHandler = null;
+
+            // Treat as a turn advance so UI resets cleanly.
+            didTurnAdvance = true;
+        }
+
+        // Apply embedded cardOpen/playCard only when we are NOT returning due to mismatch.
+        // Otherwise the card can "return then re-open" within the same userTurn payload.
+        if (!shouldReturnCardNow)
+        {
+            object cardOpen = root.TryGetValue("cardOpen", out object co) ? co : null;
+            if (cardOpen != null)
+            {
+                OnOopsCardOpenReceived(cardOpen);
+            }
+
+            object playCard = root.TryGetValue("playCard", out object pc) ? pc : null;
+            if (playCard != null)
+            {
+                OnOopsPlayingCardReceived(playCard);
+            }
         }
 
         StopAllTurnPieceHighlights();
@@ -1624,8 +1681,9 @@ public class GameManager : MonoBehaviour
 
                         if (wantsSwapAnimation)
                         {
+                            int swapTarget = (isSlider && basePosition >= 0) ? basePosition : position;
                             swapPieces.Add(piece);
-                            swapTargetIndices.Add(position);
+                            swapTargetIndices.Add(swapTarget);
                             continue;
                         }
 
@@ -1789,23 +1847,12 @@ public class GameManager : MonoBehaviour
                     int previousIndex = p.GetCurrentPathIndex();
 
                     int targetIndex = swapTargetIndices[i];
-                    bool canAnimateSwapFallback = hasAppliedSocketGameStartData && previousIndex != targetIndex && !p.IsBusy;
-                    if (canAnimateSwapFallback)
+                    p.ApplyServerPathIndexState(targetIndex);
+                    if (previousIndex != targetIndex)
                     {
-                        Debug.LogWarning($"PlayWithOops: FORCE ANIMATE SWAP fallback mappedP={p.playerNumber} pawnId={p.pieceNumber} {previousIndex}->{targetIndex}");
-                        p.MovePieceToPathIndex(targetIndex, 0);
                         movedPiecesThisUpdate.Add(p);
-                        animatedPiecesThisUpdate.Add(p);
-                    }
-                    else
-                    {
-                        p.ApplyServerPathIndexState(targetIndex);
-                        if (previousIndex != targetIndex)
-                        {
-                            movedPiecesThisUpdate.Add(p);
-                            hadSnappedMoveThisUpdate = true;
-                            Debug.LogWarning($"PlayWithOops: SNAP SWAP fallback applied mappedP={p.playerNumber} pawnId={p.pieceNumber} {previousIndex}->{targetIndex}");
-                        }
+                        hadSnappedMoveThisUpdate = true;
+                        Debug.LogWarning($"PlayWithOops: SNAP SWAP fallback applied mappedP={p.playerNumber} pawnId={p.pieceNumber} {previousIndex}->{targetIndex}");
                     }
                 }
             }
@@ -3289,6 +3336,8 @@ public class GameManager : MonoBehaviour
              StartCardPickReminderIfNeeded();
              StartTurnCountdownForCurrentPlayer();
          }
+
+         TryFlushQueuedOopsWinPopup();
      }
     
      IEnumerator MoveWatchdog(int token, PlayerPiece piece, int stepsPlanned)
@@ -4312,15 +4361,37 @@ public class GameManager : MonoBehaviour
         oopsAutoMoveSentThisTurn = false;
         oopsAutoSplitFirstSentThisTurn = false;
 
-        if (IsPlayWithOopsMode && !enableTurnTimerInPlayWithOops) return;
-        if (!modeSelected || gameOver) return;
-        if (IsBotPlayer(currentPlayer) && !enableTurnTimerForBots) return;
+        if (IsPlayWithOopsMode && !enableTurnTimerInPlayWithOops)
+        {
+            Debug.LogWarning($"TurnCountdown: skipped (PlayWithOops timer disabled). currentPlayer={currentPlayer}");
+            return;
+        }
+
+        if (!modeSelected || gameOver)
+        {
+            Debug.LogWarning($"TurnCountdown: skipped (modeSelected={modeSelected} gameOver={gameOver}). currentPlayer={currentPlayer}");
+            return;
+        }
+
+        if (IsBotPlayer(currentPlayer) && !enableTurnTimerForBots)
+        {
+            Debug.LogWarning($"TurnCountdown: skipped (bot timer disabled). currentPlayer={currentPlayer}");
+            return;
+        }
 
         GameObject activeObj = GetTurnIndicatorForPlayer(currentPlayer);
-        if (activeObj == null || !activeObj.activeInHierarchy) return;
+        if (activeObj == null || !activeObj.activeInHierarchy)
+        {
+            Debug.LogWarning($"TurnCountdown: skipped (turn indicator inactive/missing). currentPlayer={currentPlayer} indicator={(activeObj != null ? activeObj.name : "<null>")}");
+            return;
+        }
 
         Image fill = FindFilledImageInTurnIndicator(activeObj);
-        if (fill == null) return;
+        if (fill == null)
+        {
+            Debug.LogWarning($"TurnCountdown: skipped (fill image missing in indicator). currentPlayer={currentPlayer} indicator={activeObj.name}");
+            return;
+        }
 
         float effectiveMainSeconds = GetEffectiveTurnCountdownSeconds();
 
@@ -6577,6 +6648,8 @@ public class GameManager : MonoBehaviour
 
         UserSession.LoadFromPrefs();
         if (string.IsNullOrEmpty(UserSession.UserId) || string.IsNullOrEmpty(UserSession.Username)) return false;
+
+        if (!string.IsNullOrEmpty(UserSession.JwtToken)) return false;
 
         return true;
     }
@@ -8905,6 +8978,8 @@ public class GameManager : MonoBehaviour
     {
         NotifyMoveCompleted();
         Debug.Log($"OnPieceMoved called: isSplitMode={isSplitMode}, remainingSteps={remainingSteps}, selectedPiece={selectedPieceForSplit != null}");
+
+        TryFlushQueuedOopsWinPopup();
         
         // Piece move thay pachhi sabhi pieces na destination highlights clear karo
         PlayerPiece.ClearAllPiecesHighlights();
@@ -8917,6 +8992,13 @@ public class GameManager : MonoBehaviour
         if (IsPlayWithOopsMode)
         {
             if (movedPiece == null)
+            {
+                return;
+            }
+
+            // If this room update already triggered a userTurn send via snap-move fallback,
+            // do not send again on move completion (e.g., bump/kill can cause both paths).
+            if (oopsRoomUpdateSequence != 0 && oopsUserTurnSentForRoomUpdateSeq == oopsRoomUpdateSequence)
             {
                 return;
             }
